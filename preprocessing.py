@@ -98,3 +98,4 @@ def chunk_text(text: str, method: str = "tokens", **kwargs) -> List[Dict[str, An
         return chunk_by_semantic_iqr(text, kwargs["nlp"], kwargs["embedder"], kwargs.get("min_sentences", 3), kwargs.get("max_sentences", 20))
     else:
         raise ValueError(f"Unknown method: {method}. Use 'tokens' or 'semantic_iqr'")
+

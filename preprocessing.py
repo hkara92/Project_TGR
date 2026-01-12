@@ -1,5 +1,9 @@
+"""
+Minimal text cleaning and two chunking strategies.
+- Token-based (PRIMARY): stable, reproducible
+- Semantic IQR (SECONDARY): for ablation study
+"""
 
-from turtle import clear
 import re
 import unicodedata
 import numpy as np
@@ -7,7 +11,7 @@ from typing import List, Dict, Any
 
 
 def clean_text(text: str) -> str:
-    """normalize unicode, whitespace, preserve paragraphs."""
+    """Normalize unicode, whitespace, preserve paragraphs."""
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r'[ \t]+', ' ', text)           # Multiple spaces → single
     text = re.sub(r'\n{3,}', '\n\n', text)        # 3+ newlines → 2
@@ -41,38 +45,47 @@ def chunk_by_semantic_iqr(text: str, nlp, embedder, min_sentences: int = 3, max_
     # Get sentences
     sentences = [s.text.strip() for s in nlp(text).sents if s.text.strip()]
     
+    if len(sentences) == 0:
+        return []
+    
     if len(sentences) <= min_sentences:
         return [{"chunk_id": "chunk_0", "text": " ".join(sentences), "order": 0}]
     
     # Embed and compute consecutive similarities
     embeddings = embedder.encode(sentences, show_progress_bar=False)
-    similarities = [
-        np.dot(embeddings[i], embeddings[i+1]) / (np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[i+1]))
-        for i in range(len(embeddings) - 1)
-    ]
+    
+    similarities = []
+    for i in range(len(embeddings) - 1):
+        norm_i = np.linalg.norm(embeddings[i])
+        norm_j = np.linalg.norm(embeddings[i + 1])
+        # Protect against zero vectors
+        if norm_i > 0 and norm_j > 0:
+            sim = np.dot(embeddings[i], embeddings[i + 1]) / (norm_i * norm_j)
+        else:
+            sim = 0.0  # Treat zero vectors as dissimilar
+        similarities.append(sim)
     
     # Find breakpoints using IQR threshold
     q1, q3 = np.percentile(similarities, [25, 75])
     threshold = q1 - 1.5 * (q3 - q1)
-    breakpoints = [i + 1 for i, sim in enumerate(similarities) if sim < threshold]
+    breakpoint_set = set(i + 1 for i, sim in enumerate(similarities) if sim < threshold)
     
-    # Group sentences into chunks
+    # Build chunks with min/max enforcement
     chunks = []
-    start = 0
+    current_start = 0
     
-    for bp in breakpoints + [len(sentences)]:
-        if bp - start >= min_sentences:
-            chunk_text = " ".join(sentences[start:bp])
+    for i in range(1, len(sentences) + 1):
+        chunk_len = i - current_start
+        is_breakpoint = i in breakpoint_set
+        is_end = (i == len(sentences))
+        
+        # Split if: (breakpoint and chunk >= min) OR (chunk >= max) OR (end of sentences)
+        should_split = (is_breakpoint and chunk_len >= min_sentences) or (chunk_len >= max_sentences) or is_end
+        
+        if should_split and chunk_len > 0:
+            chunk_text = " ".join(sentences[current_start:i])
             chunks.append({"chunk_id": f"chunk_{len(chunks)}", "text": chunk_text, "order": len(chunks)})
-            start = bp
-    
-    # Handle remaining sentences
-    if start < len(sentences):
-        remaining = " ".join(sentences[start:])
-        if chunks:
-            chunks[-1]["text"] += " " + remaining  # Merge with last
-        else:
-            chunks.append({"chunk_id": "chunk_0", "text": remaining, "order": 0})
+            current_start = i
     
     return chunks
 
@@ -85,4 +98,3 @@ def chunk_text(text: str, method: str = "tokens", **kwargs) -> List[Dict[str, An
         return chunk_by_semantic_iqr(text, kwargs["nlp"], kwargs["embedder"], kwargs.get("min_sentences", 3), kwargs.get("max_sentences", 20))
     else:
         raise ValueError(f"Unknown method: {method}. Use 'tokens' or 'semantic_iqr'")
-

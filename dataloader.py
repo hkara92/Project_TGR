@@ -182,7 +182,7 @@ if __name__ == "__main__":
         books = load_novelqa(novelqa_path)
         if books:
             # Get first book_id
-            first_id = list(books.keys())[0]
+            first_id = list(books.keys())[1]
             book = books[first_id]
             
             print(f"\n--- NovelQA Sample ---")
@@ -190,7 +190,7 @@ if __name__ == "__main__":
             print(f"Book text length: {len(book['book_text'])} chars")
             print(f"Number of QA pairs: {len(book['qa_pairs'])}")
             if book['qa_pairs']:
-                qa = book['qa_pairs'][0]
+                qa = book['qa_pairs'][1]
                 print(f"Sample question: {qa['question'][:100]}...")
                 print(f"Options: {qa['options']}")
                 print(f"Answer: {qa['answer']}")

@@ -1,11 +1,3 @@
-"""
-llm.py
-
-Simple interface for LLM calls and tokenizers.
-- "gpt": OpenAI GPT (development)
-- "qwen": Qwen2.5-7B-Instruct (final evaluation)
-"""
-
 import os
 
 

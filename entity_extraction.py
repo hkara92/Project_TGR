@@ -205,24 +205,3 @@ def load_entities(cache_dir):
     print(f"Entities loaded from {entities_dir}")
     return I_e2c, I_c2e, entity_freq
 
-
-# Example usage
-if __name__ == "__main__":
-    nlp = load_spacy()
-    
-    sample_chunks = [
-        {"chunk_id": "chunk_0", "text": "John Smith works at Microsoft in London."},
-        {"chunk_id": "chunk_1", "text": "Mary called John about the project."},
-    ]
-    
-    I_e2c, I_c2e, entity_freq = extract_entities_from_chunks(sample_chunks, nlp)
-    
-    # Save
-    save_entities(I_e2c, I_c2e, entity_freq, "./cache/test")
-    
-    # Load back
-    I_e2c_loaded, I_c2e_loaded, entity_freq_loaded = load_entities("./cache/test")
-    
-    print("\nLoaded I_e2c:")
-    for entity, chunks in list(I_e2c_loaded.items())[:5]:
-        print(f"  {entity}: {chunks}")

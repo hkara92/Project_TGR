@@ -6,6 +6,7 @@ from dataloader import load_dataset
 from preprocessing import clean_text, chunk_text
 from summary_tree import build_raptor_tree
 from entity_extraction import load_spacy, extract_entities_from_chunks, save_entities
+from relation_extraction import extract_relations, save_triples
 
 # ============ CONFIG ============
 EMBEDDER_MODEL = "BAAI/bge-m3"
@@ -54,8 +55,10 @@ for i, book_id in enumerate(book_ids):
     save_entities(I_e2c, I_c2e, entity_freq, book_cache_dir)
     print(f"Extracted {len(I_e2c)} unique entities")
     
-    # Step 4: Extract relations (TODO)
-    # triples = extract_relations(chunks, I_c2e, nlp)
+    # Step 4: Extract relations and SAVE
+    triples = extract_relations(chunks, I_c2e, nlp)
+    save_triples(triples, book_cache_dir)
+    print(f"Extracted {len(triples)} triples")
     
     # Step 5: Build graph and indexes (TODO)
     # graph = build_graph(triples)

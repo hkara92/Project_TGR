@@ -1,8 +1,4 @@
-"""
-Minimal text cleaning and two chunking strategies.
-- Token-based (PRIMARY): stable, reproducible
-- Semantic IQR (SECONDARY): for ablation study
-"""
+
 
 import re
 import unicodedata

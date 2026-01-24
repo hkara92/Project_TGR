@@ -5,6 +5,10 @@ Core algorithm:
 1. Global UMAP + GMM clustering
 2. Local UMAP + GMM within each global cluster  
 3. Summarize clusters → embed → repeat until few nodes left
+
+Two-prompt approach:
+- Level 1 (summarizing raw chunks): LEAF_PROMPT (extractive)
+- Level 2+ (summarizing summaries): SUMMARY_PROMPT (synthetic)
 """
 
 import os
@@ -12,7 +16,53 @@ import json
 import numpy as np
 import umap
 from sklearn.mixture import GaussianMixture
+from tqdm import tqdm
 
+
+
+# ============ TWO-PROMPT TEMPLATES ============
+
+LEAF_PROMPT = """You are a helpful assistant that summarizes the details of a novel. You will be given a part of a novel. You need to summarize given content. The summary should include the main characters, the main plot and some other details. You need to return the summary in a concise manner without any additional fictive information. The length of the summary should be about 1000 tokens. 
+Here is the text passages:
+TEXT PASSAGES:
+{text}
+
+SUMMARY:"""
+
+
+SUMMARY_PROMPT = """You are a helpful assistant that further summarizes the summaries of a novel. You will be given a series of summaries of parts of a novel. You need to summarize the summaries in a concise manner. The length of the summary should be about 1000 tokens.
+Here is the summaries:
+Summary: {text}
+Now, please synthesize these summaries into a cohesive overview.
+Summary: """
+
+
+def create_summarizer(llm_fn):
+    """
+    Create a two-prompt summarizer function.
+    
+    Args:
+        llm_fn: Function that takes (prompt: str) -> str
+    
+    Returns:
+        summarizer function: (texts: List[str], level: int) -> str
+    """
+    def summarizer(texts, level):
+        combined = "\n\n---\n\n".join(texts)
+        
+        # Level 1 = summarizing raw chunks → extractive (LEAF_PROMPT)
+        # Level 2+ = summarizing summaries → synthetic (SUMMARY_PROMPT)
+        if level == 1:
+            prompt = LEAF_PROMPT.format(text=combined)
+        else:
+            prompt = SUMMARY_PROMPT.format(text=combined)
+        
+        return llm_fn(prompt)
+    
+    return summarizer
+
+
+# ============ CLUSTERING (unchanged) ============
 
 def get_optimal_k(embeddings, max_k=50):
     """Find optimal cluster count using BIC."""
@@ -100,6 +150,7 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
     return final_labels
 
 
+#  TREE BUILDING
 def build_tree(chunks, embedder, summarizer, min_nodes=3):
     """
     Build summary tree from chunks.
@@ -107,7 +158,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
     Args:
         chunks: List of {"chunk_id": str, "text": str}
         embedder: func(List[str]) -> np.ndarray
-        summarizer: func(List[str]) -> str
+        summarizer: func(List[str], level: int) -> str  # <-- NOW TAKES LEVEL
         min_nodes: Stop when fewer nodes than this
     
     Returns:
@@ -117,7 +168,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
     nodes = {}
     levels = {}
     
-    # Level 0: leaf nodes
+    # Level 0: leaf nodes (original chunks, no summarization)
     texts = [c["text"] for c in chunks]
     embeddings = embedder(texts)
     
@@ -138,9 +189,16 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
     # Build higher levels
     while len(current) >= min_nodes:
         level += 1
+        print(f"  Building Level {level} from {len(current)} nodes...")
+        
+        # Log which prompt will be used
+        prompt_type = "LEAF_PROMPT (extractive)" if level == 1 else "SUMMARY_PROMPT (synthetic)"
+        print(f"    > Using {prompt_type}")
+        
         embs = np.array([nodes[nid]["embedding"] for nid in current])
         
         # Cluster
+        print("    > Clustering nodes (UMAP + GMM)...")
         cluster_labels = cluster_nodes(embs)
         
         # Group by cluster
@@ -151,14 +209,17 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
                     clusters[c] = []
                 clusters[c].append(nid)
         
+        print(f"    > Found {len(clusters)} clusters. Generating summaries...")
+
         # Create parent nodes
         parents = []
-        for c in sorted(clusters.keys()):
+        sorted_clusters = sorted(clusters.keys())
+        for c in tqdm(sorted_clusters, desc=f"    > Summarizing Level {level}", unit="cluster"):
             children = clusters[c]
             child_texts = [nodes[nid]["text"] for nid in children]
             
-            # Summarize and embed
-            summary = summarizer(child_texts)
+            # Summarize with level info (CHANGED: pass level to summarizer)
+            summary = summarizer(child_texts, level)
             emb = embedder([summary])[0]
             
             # Collect all leaves
@@ -177,10 +238,12 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
         
         levels[level] = parents
         current = parents
-        print(f"Level {level}: {len(parents)} nodes from {len(clusters)} clusters")
+        print(f"  ✓ Level {level} complete: {len(parents)} summary nodes created.\n")
     
     return nodes, levels
 
+
+# ============ SAVE / LOAD (unchanged) ============
 
 def save_tree(nodes, levels, cache_dir):
     """Save tree to disk."""
@@ -216,3 +279,31 @@ def load_tree(cache_dir):
         nodes[nid]["embedding"] = embs[nid]
     
     return nodes, levels
+
+
+# ============ EXAMPLE USAGE ============
+
+if __name__ == "__main__":
+    from llm import call_llm
+    from sentence_transformers import SentenceTransformer
+    
+    # Setup
+    embed_model = SentenceTransformer("BAAI/bge-base-en-v1.5")
+    embedder = lambda texts: embed_model.encode(texts, normalize_embeddings=True)
+    
+    # Create two-prompt summarizer
+    summarizer = create_summarizer(lambda prompt: call_llm(prompt, llm_choice="gpt"))
+    
+    # Example chunks
+    chunks = [
+        {"chunk_id": "chunk_0", "text": "John met Mary at the coffee shop..."},
+        {"chunk_id": "chunk_1", "text": "Mary was concerned about the legal implications..."},
+        # ... more chunks
+    ]
+    
+    # Build tree
+    nodes, levels = build_tree(chunks, embedder, summarizer, min_nodes=3)
+    
+    # Save
+    save_tree(nodes, levels, "./cache/book_1")
+```

@@ -43,3 +43,26 @@ def call_llm(prompt: str, llm_choice: str = "gpt", max_tokens: int = 1024) -> st
     
     else:
         raise ValueError(f"Unknown llm_choice: {llm_choice}")
+
+
+def get_embedding(text, model="text-embedding-3-large"):
+    """Get embedding using OpenAI API. Handles single string or list of strings."""
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
+    # Ensure input is a list for the API, even if single string
+    if isinstance(text, str):
+        text = [text]
+        
+    # Replace newlines (recommended by OpenAI)
+    text = [t.replace("\n", " ") for t in text]
+    
+    response = client.embeddings.create(input=text, model=model)
+    
+    # Return list of embeddings (list of lists) or single list depending on input
+    embeddings = [data.embedding for data in response.data]
+    
+    # If using numpy elsewhere, you might want to return np.array(embeddings)
+    # But for compatibility, let's return a list of lists (or single list if appropriate)
+    import numpy as np
+    return np.array(embeddings)

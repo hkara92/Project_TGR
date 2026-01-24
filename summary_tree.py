@@ -62,7 +62,8 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
     reduced_global = umap.UMAP(
         n_neighbors=min(global_neighbors, n-1),
         n_components=global_dim,
-        metric="cosine"
+        metric="cosine",
+        random_state=42
     ).fit_transform(embeddings)
     
     global_labels, n_global = gmm_cluster(reduced_global, threshold)
@@ -85,7 +86,8 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
             reduced_local = umap.UMAP(
                 n_neighbors=min(10, len(indices)-1),
                 n_components=min(dim, len(indices)-2),
-                metric="cosine"
+                metric="cosine",
+                random_state=42
             ).fit_transform(local_emb)
             
             local_labels, n_local = gmm_cluster(reduced_local, threshold)

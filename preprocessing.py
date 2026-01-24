@@ -4,6 +4,8 @@ import re
 import unicodedata
 import numpy as np
 from typing import List, Dict, Any
+import json
+import os
 
 
 def clean_text(text: str) -> str:
@@ -82,6 +84,7 @@ def chunk_by_semantic_iqr(text: str, nlp, embedder, min_sentences: int = 3, max_
             chunk_text = " ".join(sentences[current_start:i])
             chunks.append({"chunk_id": f"chunk_{len(chunks)}", "text": chunk_text, "order": len(chunks)})
             current_start = i
+            current_start = i
     
     return chunks
 
@@ -95,3 +98,9 @@ def chunk_text(text: str, method: str = "tokens", **kwargs) -> List[Dict[str, An
     else:
         raise ValueError(f"Unknown method: {method}. Use 'tokens' or 'semantic_iqr'")
 
+
+def save_chunks(chunks: List[Dict[str, Any]], cache_dir: str):
+    """Save chunks to disk."""
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(os.path.join(cache_dir, "chunks.json"), "w", encoding="utf-8") as f:
+        json.dump(chunks, f, indent=2, ensure_ascii=False)

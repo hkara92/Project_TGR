@@ -72,9 +72,16 @@ def get_optimal_k(embeddings, max_k=50):
     
     bics = []
     for k in range(1, max_k):
-        gm = GaussianMixture(n_components=k, random_state=42)
-        gm.fit(embeddings)
-        bics.append(gm.bic(embeddings))
+        try:
+            gm = GaussianMixture(n_components=k, random_state=42, reg_covar=1e-5)
+            gm.fit(embeddings)
+            bics.append(gm.bic(embeddings))
+        except (ValueError, np.linalg.LinAlgError):
+            # If fitting fails for k, we stop trying higher k
+            break
+    
+    if not bics:
+        return 1
     
     return np.argmin(bics) + 1
 
@@ -85,8 +92,13 @@ def gmm_cluster(embeddings, threshold=0.1):
         return [[0]], 1
     
     k = get_optimal_k(embeddings)
-    gm = GaussianMixture(n_components=k, random_state=42)
-    gm.fit(embeddings)
+    try:
+        gm = GaussianMixture(n_components=k, random_state=42, reg_covar=1e-5)
+        gm.fit(embeddings)
+    except Exception:
+        # Fallback to single cluster if GMM fails even with optimal k
+        return [[0] for _ in embeddings], 1
+        
     probs = gm.predict_proba(embeddings)
     
     # Soft assignment: node in cluster if prob > threshold
@@ -150,7 +162,8 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
     return final_labels
 
 
-#  TREE BUILDING
+# ============ TREE BUILDING (minimal changes) ============
+
 def build_tree(chunks, embedder, summarizer, min_nodes=3):
     """
     Build summary tree from chunks.
@@ -179,6 +192,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
             "text": chunk["text"],
             "embedding": embeddings[i],
             "children": [],
+            "parents": [],  # <--- Added
             "leaves": [chunk["chunk_id"]]
         }
         current.append(node_id)
@@ -232,9 +246,14 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
                 "text": summary,
                 "embedding": emb,
                 "children": children,
+                "parents": [],  # <--- Added
                 "leaves": list(set(leaves))
             }
             parents.append(parent_id)
+            
+            # Back-link: Tell children who their parent is
+            for child_id in children:
+                nodes[child_id]["parents"].append(parent_id)
         
         levels[level] = parents
         current = parents
@@ -243,7 +262,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
     return nodes, levels
 
 
-# ============ SAVE / LOAD (unchanged) ============
+#  SAVE / LOAD 
 
 def save_tree(nodes, levels, cache_dir):
     """Save tree to disk."""
@@ -279,31 +298,3 @@ def load_tree(cache_dir):
         nodes[nid]["embedding"] = embs[nid]
     
     return nodes, levels
-
-
-# ============ EXAMPLE USAGE ============
-
-if __name__ == "__main__":
-    from llm import call_llm
-    from sentence_transformers import SentenceTransformer
-    
-    # Setup
-    embed_model = SentenceTransformer("BAAI/bge-base-en-v1.5")
-    embedder = lambda texts: embed_model.encode(texts, normalize_embeddings=True)
-    
-    # Create two-prompt summarizer
-    summarizer = create_summarizer(lambda prompt: call_llm(prompt, llm_choice="gpt"))
-    
-    # Example chunks
-    chunks = [
-        {"chunk_id": "chunk_0", "text": "John met Mary at the coffee shop..."},
-        {"chunk_id": "chunk_1", "text": "Mary was concerned about the legal implications..."},
-        # ... more chunks
-    ]
-    
-    # Build tree
-    nodes, levels = build_tree(chunks, embedder, summarizer, min_nodes=3)
-    
-    # Save
-    save_tree(nodes, levels, "./cache/book_1")
-```

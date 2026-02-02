@@ -45,7 +45,12 @@ Do NOT extract:
 Return a JSON array. If no relationships exist, return [].
 
 [
-  {"source": "...", "target": "...", "relation": "...", "evidence": "..."},
+  {{
+    "source": "...",
+    "target": "...",
+    "relation": "...",
+    "evidence": "..."
+  }},
   ...
 ]
 
@@ -56,9 +61,24 @@ TEXT: Alice glared at Bob across the courtyard. She had trusted him once, but hi
 
 OUTPUT:
 [
-  {"source": "Alice", "target": "Bob", "relation": "distrusts", "evidence": "She had trusted him once, but his betrayal at the castle still burned."},
-  {"source": "Bob", "target": "Alice", "relation": "betrayed", "evidence": "his betrayal at the castle still burned. \\"You sold us out,\\" she whispered."},
-  {"source": "Bob", "target": "The Castle", "relation": "betrayed allies at", "evidence": "his betrayal at the castle still burned."}
+  {{
+    "source": "Alice",
+    "target": "Bob",
+    "relation": "distrusts",
+    "evidence": "She had trusted him once, but his betrayal at the castle still burned."
+  }},
+  {{
+    "source": "Bob",
+    "target": "Alice",
+    "relation": "betrayed",
+    "evidence": "his betrayal at the castle still burned. \\"You sold us out,\\" she whispered."
+  }},
+  {{
+    "source": "Bob",
+    "target": "The Castle",
+    "relation": "betrayed allies at",
+    "evidence": "his betrayal at the castle still burned."
+  }}
 ]
 
 ---Now Extract---
@@ -123,7 +143,7 @@ def parse_json_array(text: str) -> List[Dict]:
 def extract_relations_from_chunk(
     chunk_text: str,
     entities: List[str],
-    llm_choice: str = "gpt",
+    model: str = "gpt",
     verbose: bool = True
 ) -> List[Dict]:
     """
@@ -143,12 +163,16 @@ def extract_relations_from_chunk(
 
     # Call LLM with error handling
     try:
-        response = call_llm(prompt, llm_choice=llm_choice, max_tokens=1024)
+        response = call_llm(prompt, model=model, max_tokens=8192)
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
         return []
 
     raw_relations = parse_json_array(response)
+    if not raw_relations:
+        print(f"[DEBUG] Parsing failed. Saving response to debug_llm_failure.txt")
+        with open("debug_llm_failure.txt", "w", encoding="utf-8") as f:
+            f.write(response)
 
     if verbose:
         print(f"[DEBUG] {len(entities)} entities | {len(raw_relations)} relations parsed")
@@ -261,7 +285,7 @@ def extract_relations_batch(
 
         print(f"[{i+1}/{len(to_process)}] {chunk_id}...", end=" ", flush=True)
 
-        relations = extract_relations_from_chunk(text, entities, llm_choice, verbose=False)
+        relations = extract_relations_from_chunk(text, entities, model=llm_choice, verbose=False)
 
         # Save to cache
         cache_path = get_cache_path(cache_dir, chunk_id)

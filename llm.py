@@ -1,68 +1,99 @@
+"""
+llm.py
+
+Unified interface for LLM calls and embeddings.
+Supports: OpenAI GPT-5, Qwen2.5-7B-Instruct
+"""
+
 import os
+from typing import List, Union
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 
-def get_tokenizer(llm_choice: str = "gpt"):
-    """Get tokenizer matching the LLM."""
-    if llm_choice == "gpt":
+# ============ TOKENIZER ============
+
+def get_tokenizer(model: str = "gpt"):
+    """Get tokenizer for the specified model."""
+    if model == "gpt":
         import tiktoken
         return tiktoken.get_encoding("cl100k_base")
-    elif llm_choice == "qwen":
+    elif model == "qwen":
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     else:
-        raise ValueError(f"Unknown llm_choice: {llm_choice}")
+        raise ValueError(f"Unknown model: {model}")
 
 
-def call_llm(prompt: str, llm_choice: str = "gpt", max_tokens: int = 1024) -> str:
-    """Call LLM and return response text."""
-    if llm_choice == "gpt":
+# ============ LLM CALLS ============
+
+def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 1024) -> str:
+    """
+    Call LLM and return response text.
+    
+    Args:
+        prompt: Input prompt
+        model: "gpt" (GPT-5) or "qwen" (Qwen2.5-7B-Instruct)
+        max_tokens: Maximum tokens to generate
+    """
+    if model == "gpt":
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=0.0
+            max_completion_tokens=max_tokens
         )
-        return response.choices[0].message.content.strip()
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason == "length":
+            print("[WARNING] LLM output truncated due to Max Tokens limit!")
+        print(f"[DEBUG] Finish reason: {finish_reason}")
+        content = response.choices[0].message.content
+        if content is None:
+            return ""
+        return content.strip()
     
-    elif llm_choice == "qwen":
+    elif model == "qwen":
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct", torch_dtype=torch.bfloat16, device_map="auto")
-        
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=max_tokens)
+        llm = AutoModelForCausalLM.from_pretrained(
+            "Qwen/Qwen2.5-7B-Instruct",
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
+        inputs = tokenizer(prompt, return_tensors="pt").to(llm.device)
+        outputs = llm.generate(**inputs, max_new_tokens=max_tokens)
         return tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
     
     else:
-        raise ValueError(f"Unknown llm_choice: {llm_choice}")
+        raise ValueError(f"Unknown model: {model}")
 
 
-def get_embedding(text, model="text-embedding-3-large"):
-    """Get embedding using OpenAI API. Handles single string or list of strings."""
+# ============ EMBEDDINGS ============
+
+def get_embeddings(texts: Union[str, List[str]]) -> List[List[float]]:
+    """Get embeddings using OpenAI text-embedding-3-large."""
     from openai import OpenAI
+    
+    if isinstance(texts, str):
+        texts = [texts]
+    if not texts:
+        return []
+    
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    all_embeddings = []
     
-    # Ensure input is a list for the API, even if single string
-    if isinstance(text, str):
-        text = [text]
-        
-    # Replace newlines (recommended by OpenAI)
-    text = [t.replace("\n", " ") for t in text]
+    for i in range(0, len(texts), 100):  # Batch size 100
+        batch = texts[i:i + 100]
+        response = client.embeddings.create(model="text-embedding-3-large", input=batch)
+        all_embeddings.extend([item.embedding for item in response.data])
     
-    response = client.embeddings.create(input=text, model=model)
-    
-    # Return list of embeddings (list of lists) or single list depending on input
-    embeddings = [data.embedding for data in response.data]
-    
-    # If using numpy elsewhere, you might want to return np.array(embeddings)
-    # But for compatibility, let's return a list of lists (or single list if appropriate)
-    import numpy as np
-    return np.array(embeddings)
+    return all_embeddings
+
+
+def get_embedding_dim() -> int:
+    """Return embedding dimension (3072 for text-embedding-3-large)."""
+    return 3072

@@ -18,7 +18,11 @@ def clean_text(text: str) -> str:
 
 def chunk_by_tokens(text: str, tokenizer, chunk_size: int = 1000, overlap: int = 100) -> List[Dict[str, Any]]:
     """Split text into overlapping token-based chunks."""
-    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    # Handle encode arguments (tiktoken doesn't accept add_special_tokens)
+    try:
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        token_ids = tokenizer.encode(text)
     
     chunks = []
     start = 0
@@ -26,7 +30,11 @@ def chunk_by_tokens(text: str, tokenizer, chunk_size: int = 1000, overlap: int =
     
     while start < len(token_ids):
         end = min(start + chunk_size, len(token_ids))
-        chunk_text = tokenizer.decode(token_ids[start:end], skip_special_tokens=True).strip()
+        
+        try:
+            chunk_text = tokenizer.decode(token_ids[start:end], skip_special_tokens=True).strip()
+        except TypeError:
+            chunk_text = tokenizer.decode(token_ids[start:end]).strip()
         
         if chunk_text:
             chunks.append({"chunk_id": f"chunk_{len(chunks)}", "text": chunk_text, "order": len(chunks)})
@@ -38,8 +46,11 @@ def chunk_by_tokens(text: str, tokenizer, chunk_size: int = 1000, overlap: int =
     return chunks
 
 
-def chunk_by_semantic_iqr(text: str, nlp, embedder, min_sentences: int = 3, max_sentences: int = 20) -> List[Dict[str, Any]]:
+
+def chunk_by_semantic_iqr(text: str, nlp, min_sentences: int = 3, max_sentences: int = 20) -> List[Dict[str, Any]]:
     """Split by semantic similarity breakpoints using IQR."""
+    from llm import get_embeddings  # Use OpenAI embeddings
+    
     # Get sentences
     sentences = [s.text.strip() for s in nlp(text).sents if s.text.strip()]
     
@@ -49,8 +60,9 @@ def chunk_by_semantic_iqr(text: str, nlp, embedder, min_sentences: int = 3, max_
     if len(sentences) <= min_sentences:
         return [{"chunk_id": "chunk_0", "text": " ".join(sentences), "order": 0}]
     
-    # Embed and compute consecutive similarities
-    embeddings = embedder.encode(sentences, show_progress_bar=False)
+    # Embed using OpenAI (replaces sentence-transformers)
+    embeddings = get_embeddings(sentences)
+    embeddings = np.array(embeddings)  # Convert to numpy
     
     similarities = []
     for i in range(len(embeddings) - 1):

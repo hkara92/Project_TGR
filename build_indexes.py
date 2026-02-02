@@ -55,7 +55,7 @@ def build_faiss_index(book_cache_dir):
     with open(mapping_path, "w", encoding="utf-8") as f:
         json.dump(node_ids, f, indent=2)
         
-    print(f"    ✓ FAISS Index saved ({len(node_ids)} vectors)")
+    print(f"    FAISS Index saved ({len(node_ids)} vectors)")
 
 
 def build_inverted_indexes(book_cache_dir):
@@ -114,7 +114,7 @@ def build_inverted_indexes(book_cache_dir):
     with open(os.path.join(indexes_dir, "I_e2s.json"), "w", encoding="utf-8") as f:
         json.dump(I_e2s, f, indent=2, ensure_ascii=False)
     
-    print(f"    ✓ Inverted Indexes saved to {indexes_dir}")
+    print(f"    Inverted Indexes saved to {indexes_dir}")
     print(f"    Stats: {len(I_s2e)} summaries, {len(I_e2s)} entities mapped.")
 
 
@@ -149,7 +149,7 @@ def main():
         book_cache = os.path.join(BASE_CACHE_DIR, book_id)
         extract_all_indexes(book_cache)
     
-    print("\n✓ Done.")
+    print("\nDone.")
 
 if __name__ == "__main__":
     main()

@@ -49,10 +49,13 @@ NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
 
 # How many chunks to retrieve per question
-MAX_CHUNKS = 15      
+MAX_CHUNKS = 25      
 SHORTEST_PATH_K = 4
 
-QA_PROMPT = """You are a helpful assistant, you are given a question, please answer the question based on the given evidences. The answer should be an option among "A", "B", "C", and "D" that supported by the given evidences and matches the question. You should not assume any information beyond the evidence. You should only output the option. The format of the Evidence is keyEntity1_keyEntity2: Related chunks, which means the related chunks contain the information of the relationship between keyEntity1 and keyEntity2, where keyEntity1 and keyEntity2 are the entities in the question.
+QA_PROMPT = """You are a helpful assistant. You are given a question and evidence. 
+Please answer based ONLY on the evidence. 
+The answer must be exactly one of the options: "A", "B", "C", or "D".
+Do NOT explain your reasoning. Output ONLY the single letter.
 
 Question: {question}
 Evidence: {evidence}

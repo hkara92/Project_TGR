@@ -159,10 +159,20 @@ class Retriever:
     # RETRIEVAL METHODS
     # -------------------------------------------------------------------------
     
-    def local_retrieval(self, entities: List[str], k: int) -> Dict[str, List[str]]:
+    def local_retrieval(self, entities: List[str], k: int, allow_fallback: bool = True) -> Dict[str, List[str]]:
         """Graph-based retrieval: find pairs -> map to chunks -> merge keys."""
+        if len(entities) < 2:
+            return {} # Force fallback to Occurrence Ranking (Dense + Entity)
+
         pairs = self.graph_filter(entities, k)
-        init_chunks = self.index_mapping(pairs) if pairs else self.index_mapping(entities)
+        
+        if pairs:
+             init_chunks = self.index_mapping(pairs)
+        elif allow_fallback:
+             init_chunks = self.index_mapping(entities)
+        else:
+             return {}
+             
         return self.merge_keys(init_chunks)
     
     def dense_retrieval(self, query: str, k: int) -> Dict[str, List[str]]:
@@ -341,8 +351,17 @@ class Retriever:
         while count > max_chunks and k > 1:
             prev_res = copy.deepcopy(local_res)
             k -= 1
-            local_res = self.local_retrieval(entities, k)
-            count = self._count_chunks(local_res)
+            # Strict mode: If k=1 yields no pairs, do NOT explode to all entities.
+            new_res = self.local_retrieval(entities, k, allow_fallback=False)
+            
+            new_count = self._count_chunks(new_res)
+            
+            if new_count == 0:
+                logger.info(f"Tighten: k={k} yielded 0. Reverting to k={k+1}")
+                break
+                
+            local_res = new_res
+            count = new_count
             history.append((k, count))
             logger.info(f"Tighten: k={k}, count={count}")
         
@@ -387,22 +406,22 @@ def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
     from neo4j import GraphDatabase
     
     # Load tree
-    with open(os.path.join(cache_dir, "summary_tree", "nodes.json"), "r") as f:
+    with open(os.path.join(cache_dir, "summary_tree", "nodes.json"), "r", encoding="utf-8") as f:
         tree = json.load(f)
     
     # Load indexes
-    with open(os.path.join(cache_dir, "summary_tree", "I_s2e.json"), "r") as f:
+    with open(os.path.join(cache_dir, "summary_tree", "I_s2e.json"), "r", encoding="utf-8") as f:
         I_s2e = json.load(f)
-    with open(os.path.join(cache_dir, "summary_tree", "I_e2s.json"), "r") as f:
+    with open(os.path.join(cache_dir, "summary_tree", "I_e2s.json"), "r", encoding="utf-8") as f:
         I_e2s = json.load(f)
-    with open(os.path.join(cache_dir, "entities", "I_c2e.json"), "r") as f:
+    with open(os.path.join(cache_dir, "entities", "I_c2e.json"), "r", encoding="utf-8") as f:
         I_c2e = json.load(f)
-    with open(os.path.join(cache_dir, "entities", "I_e2c.json"), "r") as f:
+    with open(os.path.join(cache_dir, "entities", "I_e2c.json"), "r", encoding="utf-8") as f:
         I_e2c = json.load(f)
     
     # Load FAISS
     faiss_index = faiss.read_index(os.path.join(cache_dir, "summary_tree", "tree.index"))
-    with open(os.path.join(cache_dir, "summary_tree", "faiss_id_map.json"), "r") as f:
+    with open(os.path.join(cache_dir, "summary_tree", "faiss_id_map.json"), "r", encoding="utf-8") as f:
         node_id_list = json.load(f)
     
     # Connect Neo4j

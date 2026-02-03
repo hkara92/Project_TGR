@@ -41,9 +41,9 @@ def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 1024) -> str:
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         response = client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=max_tokens
+            max_tokens=max_tokens
         )
         finish_reason = response.choices[0].finish_reason
         if finish_reason == "length":

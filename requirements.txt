@@ -1,0 +1,8 @@
+﻿openai
+neo4j
+spacy
+transformers
+tiktoken
+python-dotenv
+numpy
+faiss-cpu

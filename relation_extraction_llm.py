@@ -26,7 +26,9 @@ You are a knowledge-graph relation extractor. Given a text chunk and a list of e
    - source: entity name (exactly as provided)
    - target: entity name (exactly as provided)
    - relation: a short verb phrase (1-5 words), e.g., "loves", "works for", "distrusts", "travels to"
-   - evidence: 1-2 sentences copied from the text that support this relationship
+    - evidence: 1-2 sentences copied from the text that support this relationship. IMPORTANT: Escape double quotes within the string (e.g. \"text\").
+   3. Do NOT treat interjections/utterances (e.g., ‘hoorray’) as entities
+
 
 ---What Counts as a Relationship---
 Include relationships that are:
@@ -71,7 +73,7 @@ OUTPUT:
     "source": "Bob",
     "target": "Alice",
     "relation": "betrayed",
-    "evidence": "his betrayal at the castle still burned. \\"You sold us out,\\" she whispered."
+    "evidence": "his betrayal at the castle still burned. \"You sold us out,\" she whispered."
   }},
   {{
     "source": "Bob",
@@ -115,7 +117,7 @@ def canonicalize_relation(s: str) -> str:
 # ============== JSON PARSING ==============
 
 def parse_json_array(text: str) -> List[Dict]:
-    """Extract JSON array from LLM response."""
+    """Extract JSON array from LLM response. Returns None if parsing fails."""
     text = (text or '').strip()
     if not text:
         return []
@@ -128,14 +130,14 @@ def parse_json_array(text: str) -> List[Dict]:
     match = re.search(r'\[.*\]', text, re.DOTALL)
     if not match:
         print(f"[WARN] No JSON array found in LLM response")
-        return []
+        return None
 
     try:
         result = json.loads(match.group())
         return result if isinstance(result, list) else []
     except json.JSONDecodeError as e:
         print(f"[WARN] JSON parse failed: {e}")
-        return []
+        return None
 
 
 # ============== SINGLE CHUNK EXTRACTION ==============
@@ -148,11 +150,7 @@ def extract_relations_from_chunk(
 ) -> List[Dict]:
     """
     Extract relations from a single chunk.
-
-    Validation:
-    - source/target must match provided entity list (case-insensitive via canonicalize)
-    - no self loops
-    - dedup within chunk using canonicalized keys
+    Returns None if extraction failed (to avoid caching empty results).
     """
     if len(entities) < 2:
         return []
@@ -163,16 +161,17 @@ def extract_relations_from_chunk(
 
     # Call LLM with error handling
     try:
-        response = call_llm(prompt, model=model, max_tokens=8192)
+        response = call_llm(prompt, model=model, max_tokens=16384)
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
-        return []
+        return None
 
     raw_relations = parse_json_array(response)
-    if not raw_relations:
+    if raw_relations is None:
         print(f"[DEBUG] Parsing failed. Saving response to debug_llm_failure.txt")
         with open("debug_llm_failure.txt", "w", encoding="utf-8") as f:
             f.write(response)
+        return None
 
     if verbose:
         print(f"[DEBUG] {len(entities)} entities | {len(raw_relations)} relations parsed")
@@ -287,18 +286,21 @@ def extract_relations_batch(
 
         relations = extract_relations_from_chunk(text, entities, model=llm_choice, verbose=False)
 
-        # Save to cache
-        cache_path = get_cache_path(cache_dir, chunk_id)
-        with open(cache_path, 'w', encoding="utf-8") as f:
-            json.dump({"chunk_id": chunk_id, "relations": relations}, f, indent=2, ensure_ascii=False)
+        if relations is not None:
+            # Save to cache ONLY if successful
+            cache_path = get_cache_path(cache_dir, chunk_id)
+            with open(cache_path, 'w', encoding="utf-8") as f:
+                json.dump({"chunk_id": chunk_id, "relations": relations}, f, indent=2, ensure_ascii=False)
 
-        # Add to results
-        for rel in relations:
-            rel_copy = rel.copy()
-            rel_copy["chunk_id"] = chunk_id
-            all_relations.append(rel_copy)
+            # Add to results
+            for rel in relations:
+                rel_copy = rel.copy()
+                rel_copy["chunk_id"] = chunk_id
+                all_relations.append(rel_copy)
 
-        print(f"{len(relations)} relations")
+            print(f"{len(relations)} relations")
+        else:
+            print("FAILED (skipping cache save)")
 
     print(f"Total relations extracted: {len(all_relations)}")
     return all_relations

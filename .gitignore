@@ -1,5 +1,9 @@
 # Data folder
 data/
+cache/
+neo4j_data/
+neo4j_logs/
+*.dump
 
 # Virtual environments
 venv/

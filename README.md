@@ -10,6 +10,10 @@ The system integrates knowledge graph construction with hierarchical document pr
 *   **Knowledge Graph Construction**: Extracts entities by NLP and relations by LLM to push to Neo4j.
 *   **Retrieval**: Implements adaptive retrieval strategies (Graph Traversal, Vector Search, Entity Filtering).
 
+## Dataset Setup
+
+Please refer to [DATA_SETUP.md](./DATA_SETUP.md) for detailed instructions on how to download and set up the **InfiniteBench** and **NovelQA** datasets.
+
 ## Key Components
 
 ### `run_indexing.py`

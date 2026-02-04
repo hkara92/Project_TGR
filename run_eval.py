@@ -19,7 +19,7 @@ import os
 import re
 
 # Project Modules
-from retrieval_e2 import load_retriever_from_cache
+from C1_retrieval import load_retriever_from_cache
 from dataloader import load_dataset
 from llm import get_embeddings, call_llm
 

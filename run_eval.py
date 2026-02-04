@@ -150,18 +150,25 @@ def evaluate_book(raw_book_id, dataset):
                 if iso_match:
                     final_pred = iso_match.group(1)
         
+        # Get Ground Truth Text
+        labels = ["A", "B", "C", "D"]
+        gt_idx = labels.index(qa['answer']) if qa['answer'] in labels else -1
+        ground_truth_text = qa['options'][gt_idx] if 0 <= gt_idx < len(qa['options']) else str(qa['answer'])
+
         # Store Result
         results.append({
             "question_id": i,
             "question": qa["question"],
             "options": qa["options"],
             "ground_truth": qa["answer"],
+            "ground_truth_text": ground_truth_text,
             "prediction": final_pred,
             "raw_llm_output": llm_output,
             "evidence_used": evidence_text,
             "retrieval_info": {
                 "type": result.get("retrieval_type", "Unknown"),
                 "entities_found": result.get("entities", []),
+                "chunk_ids": result.get("chunk_ids", {}),
                 "history": result.get("chunk_counts_history", [])
             }
         })

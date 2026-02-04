@@ -228,14 +228,14 @@ class Retriever:
     def _node_id_to_chunk_id(self, node_id: str) -> str:
         """Normalize node ID to chunk_X format for I_c2e/I_e2c lookup."""
         if node_id.startswith("L0_"):
-            return node_id[3:]  # "L0_chunk_5" → "chunk_5"
+            return node_id[3:]  # "L0_chunk_5" to "chunk_5"
         return node_id  # Already "chunk_5" or summary node
     
     def _count_entity_matches(self, node_id: str, entities: List[str]) -> int:
         """Count query entities present in a node. Handles both chunk_X and L0_chunk_X formats."""
         # Normalize: convert L0_chunk_X → chunk_X for I_c2e lookup
         if node_id.startswith("L0_"):
-            chunk_id = node_id[3:]  # "L0_chunk_5" → "chunk_5"
+            chunk_id = node_id[3:]  # "L0_chunk_5" to "chunk_5"
         else:
             chunk_id = node_id  # Already "chunk_5" format
         
@@ -257,7 +257,7 @@ class Retriever:
         """Assign entity keys to nodes based on contained entities. Handles both ID formats."""
         result = {}
         for node_id in nodes:
-            # Normalize: convert L0_chunk_X → chunk_X for I_c2e lookup
+            # Normalize: convert L0_chunk_X to chunk_X for I_c2e lookup
             if node_id.startswith("L0_"):
                 chunk_id = node_id[3:]
             else:
@@ -338,15 +338,15 @@ class Retriever:
         history = [(k, count)]
         logger.info(f"Local: k={k}, count={count}")
         
-        # Step 4: Zero results -> Occurrence rerank
+        # Step 4: Zero results to Occurrence rerank
         if count == 0:
             logger.info("Local=0 -> Occurrence Rerank")
-            # Dense retrieval gets 2x candidates -> filtered by Entities
+            # Dense retrieval gets 2x candidates to filtered by Entities
             dense = self.dense_retrieval(dense_input, max_chunks * 2)
             res = self.occurrence_ranking(dense.get("", []), entities, max_chunks)
             return self._build_result(res, entities, "Occurrence Rerank", history)
         
-        # Step 5: Too many -> Iterative tightening
+        # Step 5: Too many to Iterative tightening
         prev_res = None
         while count > max_chunks and k > 1:
             prev_res = copy.deepcopy(local_res)
@@ -370,7 +370,7 @@ class Retriever:
             rtype = f"Local, Loop for {len(history)-1} times"
             return self._build_result(local_res, entities, rtype, history)
         
-        # Tightening hit 0 -> EntityAware filter
+        # Tightening hit 0 to EntityAware filter
         logger.info("Tightening hit 0 -> EntityAware Filter")
         if prev_res:
             res = self.entityaware_filter(prev_res, entities, max_chunks)

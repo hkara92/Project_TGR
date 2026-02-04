@@ -6,3 +6,7 @@ tiktoken
 python-dotenv
 numpy
 faiss-cpu
+umap-learn
+scikit-learn
+tqdm
+rouge

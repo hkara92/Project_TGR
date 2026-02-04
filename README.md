@@ -68,7 +68,7 @@ python calculate_metrics.py
 *   `entity_extraction.py`: SpaCy-based entity extraction
 *   `relation_extraction_llm.py`: LLM-based relation extraction
 *   `build_graph.py`: Neo4j loader script
-*   `retrieval_e2.py`: Core retrieval logic (Graph + Vector)
+*   `C1_retrieval.py`: Core retrieval logic (Graph + Vector)
 *   `llm.py`: Unified LLM interface (OpenAI)
 *   `data/`: Contains dataset files
 *   `cache/`: Stores generated artifacts (Entities, Trees, Indexes)

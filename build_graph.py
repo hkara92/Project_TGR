@@ -51,14 +51,14 @@ def setup_schema(tx):
     REQUIRE (c.book_id, c.chunk_id) IS UNIQUE
     """)
 
-    # Optional: makes filtering by relation faster
+    # makes filtering by relation faster
     tx.run("""
     CREATE INDEX rel_relation IF NOT EXISTS
     FOR ()-[r:RELATION]-()
     ON (r.relation)
     """)
 
-    # Optional: makes filtering by book_id faster
+    # makes filtering by book_id faster
     tx.run("""
     CREATE INDEX entity_book IF NOT EXISTS
     FOR (e:Entity)

@@ -26,8 +26,7 @@ You are a knowledge-graph relation extractor. Given a text chunk and a list of e
    - source: entity name (exactly as provided)
    - target: entity name (exactly as provided)
    - relation: a short verb phrase (1-5 words), e.g., "loves", "works for", "distrusts", "travels to"
-    - evidence: 1-2 sentences copied from the text that support this relationship. IMPORTANT: Escape double quotes within the string (e.g. \"text\").
-   3. Do NOT treat interjections/utterances (e.g., ‘hoorray’) as entities
+3. Do NOT treat interjections/utterances (e.g., ‘hoorray’) as entities
 
 
 ---What Counts as a Relationship---
@@ -47,12 +46,11 @@ Do NOT extract:
 Return a JSON array. If no relationships exist, return [].
 
 [
-  {{
+  {
     "source": "...",
     "target": "...",
-    "relation": "...",
-    "evidence": "..."
-  }},
+    "relation": "..."
+  },
   ...
 ]
 
@@ -63,24 +61,21 @@ TEXT: Alice glared at Bob across the courtyard. She had trusted him once, but hi
 
 OUTPUT:
 [
-  {{
+  {
     "source": "Alice",
     "target": "Bob",
-    "relation": "distrusts",
-    "evidence": "She had trusted him once, but his betrayal at the castle still burned."
-  }},
-  {{
+    "relation": "distrusts"
+  },
+  {
     "source": "Bob",
     "target": "Alice",
-    "relation": "betrayed",
-    "evidence": "his betrayal at the castle still burned. \"You sold us out,\" she whispered."
-  }},
-  {{
+    "relation": "betrayed"
+  },
+  {
     "source": "Bob",
     "target": "The Castle",
-    "relation": "betrayed allies at",
-    "evidence": "his betrayal at the castle still burned."
-  }}
+    "relation": "betrayed allies at"
+  }
 ]
 
 ---Now Extract---
@@ -189,8 +184,6 @@ def extract_relations_from_chunk(
         source = rel.get("source", "")
         target = rel.get("target", "")
         relation = rel.get("relation", "")
-        evidence = rel.get("evidence", "")
-
         if not (source and target and relation):
             continue
 
@@ -215,8 +208,7 @@ def extract_relations_from_chunk(
         validated.append({
             "source": s_norm,
             "relation": r_norm,
-            "target": t_norm,
-            "evidence": (evidence or "")[:500]
+            "target": t_norm
         })
 
     return validated
@@ -324,8 +316,7 @@ def merge_relations(relations: List[Dict]) -> List[Dict]:
                 "relation": rel["relation"],
                 "target": rel["target"],
                 "weight": 0,
-                "chunk_ids": [],
-                "evidences": []
+                "chunk_ids": []
             }
 
         edge = edge_map[key]
@@ -334,10 +325,6 @@ def merge_relations(relations: List[Dict]) -> List[Dict]:
         chunk_id = rel.get("chunk_id", "")
         if chunk_id and chunk_id not in edge["chunk_ids"]:
             edge["chunk_ids"].append(chunk_id)
-
-        evidence = rel.get("evidence", "")
-        if evidence and evidence not in edge["evidences"] and len(edge["evidences"]) < 3:
-            edge["evidences"].append(evidence)
 
     edges = sorted(edge_map.values(), key=lambda x: x["weight"], reverse=True)
     return edges

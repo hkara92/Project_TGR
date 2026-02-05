@@ -39,7 +39,7 @@ def extract_entities_from_chunks(chunks, nlp, batch_size=32):
 
     texts = [c["text"] for c in chunks]
     for doc, chunk in zip(nlp.pipe(texts, batch_size=batch_size), chunks):
-        cid = chunk["chunk_id"]
+        cid = f"L0_{chunk['chunk_id']}"
         ents = extract_ner_entities(doc)
 
         I_c2e[cid] = ents

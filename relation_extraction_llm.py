@@ -253,7 +253,7 @@ def extract_relations_batch(
 
     # Check cache
     for chunk in chunks:
-        chunk_id = chunk["chunk_id"]
+        chunk_id = f"L0_{chunk['chunk_id']}"
         entities = I_c2e.get(chunk_id, [])
 
         if len(entities) < 2:
@@ -278,7 +278,7 @@ def extract_relations_batch(
 
     # Process remaining chunks
     for i, chunk in enumerate(to_process):
-        chunk_id = chunk["chunk_id"]
+        chunk_id = f"L0_{chunk['chunk_id']}"
         text = chunk["text"]
         entities = I_c2e.get(chunk_id, [])
 

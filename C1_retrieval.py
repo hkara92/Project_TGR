@@ -225,19 +225,9 @@ class Retriever:
     # HELPERS
     # -------------------------------------------------------------------------
     
-    def _node_id_to_chunk_id(self, node_id: str) -> str:
-        """Normalize node ID to chunk_X format for I_c2e/I_e2c lookup."""
-        if node_id.startswith("L0_"):
-            return node_id[3:]  # "L0_chunk_5" to "chunk_5"
-        return node_id  # Already "chunk_5" or summary node
-    
     def _count_entity_matches(self, node_id: str, entities: List[str]) -> int:
-        """Count query entities present in a node. Handles both chunk_X and L0_chunk_X formats."""
-        # Normalize: convert L0_chunk_X → chunk_X for I_c2e lookup
-        if node_id.startswith("L0_"):
-            chunk_id = node_id[3:]  # "L0_chunk_5" to "chunk_5"
-        else:
-            chunk_id = node_id  # Already "chunk_5" format
+        """Count query entities present in a node."""
+        chunk_id = node_id  # IDs are now aligned (L0_chunk_X)
         
         # Try chunk lookup (I_c2e uses chunk_X format)
         if chunk_id in self.I_c2e:
@@ -254,14 +244,10 @@ class Retriever:
         return len(set(entities) & node_entities)
     
     def _assign_entity_keys(self, nodes: List[str], entities: List[str]) -> Dict[str, List[str]]:
-        """Assign entity keys to nodes based on contained entities. Handles both ID formats."""
+        """Assign entity keys to nodes based on contained entities."""
         result = {}
         for node_id in nodes:
-            # Normalize: convert L0_chunk_X to chunk_X for I_c2e lookup
-            if node_id.startswith("L0_"):
-                chunk_id = node_id[3:]
-            else:
-                chunk_id = node_id
+            chunk_id = node_id  # IDs are now aligned
             
             # Try chunk lookup
             if chunk_id in self.I_c2e:
@@ -340,7 +326,7 @@ class Retriever:
         
         # Step 4: Zero results to Occurrence rerank
         if count == 0:
-            logger.info("Local=0 -> Occurrence Rerank")
+            logger.info("Local=0 to Occurrence Rerank")
             # Dense retrieval gets 2x candidates to filtered by Entities
             dense = self.dense_retrieval(dense_input, max_chunks * 2)
             res = self.occurrence_ranking(dense.get("", []), entities, max_chunks)

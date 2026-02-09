@@ -34,7 +34,7 @@ from dataloader import load_dataset
 from preprocessing import clean_text, chunk_text, save_chunks
 from summary_tree import build_tree, save_tree, create_summarizer
 from entity_extraction import load_spacy, extract_entities_from_chunks, save_entities
-from llm import call_llm, get_tokenizer, get_embeddings
+from llm import call_llm, get_tokenizer, get_embeddings, reset_token_usage, get_token_usage
 from relation_extraction_llm import extract_and_merge_relations
 from build_indexes import extract_all_indexes
 
@@ -90,15 +90,27 @@ for i, book_id in enumerate(book_ids):
                 chunks = json.load(f)
         else:
             print("Creating chunks...")
-            chunks = chunk_text(clean_text(book_data["book_text"]), CHUNKING_METHOD, tokenizer, CHUNK_SIZE, OVERLAP, nlp, embedder)
+            chunks = chunk_text(
+                text=clean_text(book_data["book_text"]), 
+                method=CHUNKING_METHOD, 
+                tokenizer=tokenizer, 
+                chunk_size=CHUNK_SIZE, 
+                overlap=OVERLAP, 
+                nlp=nlp, 
+                embedder=embedder
+            )
             save_chunks(chunks, book_cache_dir)
             print(f"  Saved {len(chunks)} chunks.")
 
         # Summary Tree
         print("Building Summary Tree...")
+        reset_token_usage()
         summarizer_fn = create_summarizer(lambda prompt: call_llm(prompt, model=LLM_CHOICE))
         nodes, levels = build_tree(chunks, lambda texts: embedder.encode(texts), summarizer_fn)
         save_tree(nodes, levels, book_cache_dir)
+        
+        in_tok, out_tok = get_token_usage()
+        print(f"  > Summary Tree Token Usage: Input={in_tok}, Output={out_tok} (Total={in_tok+out_tok})")
         
         duration_tree = time.time() - start_time
         with open(os.path.join(book_cache_dir, "indexing_time_tree.txt"), "w") as f:

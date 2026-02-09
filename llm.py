@@ -8,8 +8,21 @@ Supports: OpenAI GPT-5, Qwen2.5-7B-Instruct
 import os
 from typing import List, Union
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
+
+# Global token counters
+INPUT_TOKENS = 0
+OUTPUT_TOKENS = 0
+
+def reset_token_usage():
+    global INPUT_TOKENS, OUTPUT_TOKENS
+    INPUT_TOKENS = 0
+    OUTPUT_TOKENS = 0
+
+def get_token_usage():
+    return INPUT_TOKENS, OUTPUT_TOKENS
 
 
 # ============ TOKENIZER ============
@@ -18,7 +31,7 @@ def get_tokenizer(model: str = "gpt"):
     """Get tokenizer for the specified model."""
     if model == "gpt":
         import tiktoken
-        return tiktoken.get_encoding("cl100k_base")
+        return tiktoken.encoding_for_model("gpt-5-mini")
     elif model == "qwen":
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
@@ -28,7 +41,7 @@ def get_tokenizer(model: str = "gpt"):
 
 # ============ LLM CALLS ============
 
-def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 1024) -> str:
+def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 4096) -> str:
     """
     Call LLM and return response text.
     
@@ -40,19 +53,31 @@ def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 1024) -> str:
     if model == "gpt":
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens
+        # Using the new Responses API capable of handling GPT-5 reasoning models
+        resp = client.responses.create(
+            model="gpt-5-mini",
+            input=prompt,
+            max_output_tokens=max_tokens,
+            reasoning={"effort": "low"},
         )
-        finish_reason = response.choices[0].finish_reason
-        if finish_reason == "length":
-            print("[WARNING] LLM output truncated due to Max Tokens limit!")
-        print(f"[DEBUG] Finish reason: {finish_reason}")
-        content = response.choices[0].message.content
-        if content is None:
-            return ""
-        return content.strip()
+        # print(json.dumps(resp.model_dump(), indent=2)[:6000])
+        
+        # Track usage
+        if hasattr(resp, 'usage'):
+            # Note: Responses API usage structure might vary
+            if resp.usage:
+                # Try standard OpenAI usage attributes (completion/prompt or output/input)
+                in_tok = getattr(resp.usage, 'input_tokens', 0) or getattr(resp.usage, 'prompt_tokens', 0)
+                out_tok = getattr(resp.usage, 'output_tokens', 0) or getattr(resp.usage, 'completion_tokens', 0)
+                
+                global INPUT_TOKENS, OUTPUT_TOKENS
+                INPUT_TOKENS += in_tok
+                OUTPUT_TOKENS += out_tok
+                
+                print(f"[LLM] Call Usage: In={in_tok}, Out={out_tok}")
+        
+        text = resp.output_text or ""
+        return text.strip()
     
     elif model == "qwen":
         import torch
@@ -74,7 +99,7 @@ def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 1024) -> str:
 
 # ============ EMBEDDINGS ============
 
-def get_embeddings(texts: Union[str, List[str]]) -> List[List[float]]:
+def get_embeddings(texts: Union[str, List[str]], model: str = "text-embedding-3-large") -> List[List[float]]:
     """Get embeddings using OpenAI text-embedding-3-large."""
     from openai import OpenAI
     
@@ -88,7 +113,7 @@ def get_embeddings(texts: Union[str, List[str]]) -> List[List[float]]:
     
     for i in range(0, len(texts), 100):  # Batch size 100
         batch = texts[i:i + 100]
-        response = client.embeddings.create(model="text-embedding-3-large", input=batch)
+        response = client.embeddings.create(model=model, input=batch)
         all_embeddings.extend([item.embedding for item in response.data])
     
     return all_embeddings

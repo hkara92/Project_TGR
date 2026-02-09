@@ -66,7 +66,8 @@ def create_summarizer(llm_fn):
 
 def get_optimal_k(embeddings, max_k=50):
     """Find optimal cluster count using BIC."""
-    max_k = min(max_k, len(embeddings))
+    max_k = min(max_k, max(1, len(embeddings) // 2))
+    
     if max_k <= 1:
         return 1
     
@@ -113,42 +114,61 @@ def gmm_cluster(embeddings, threshold=0.1):
 
 
 def cluster_nodes(embeddings, dim=10, threshold=0.1):
-    """Two-stage clustering: global UMAP+GMM → local UMAP+GMM per cluster."""
+    """Two-stage clustering with dynamic UMAP parameters (RAPTOR-style)."""
     n = len(embeddings)
-    if n < 3:
+    if n <= 1:
         return [[0]] * n
     
+    # RAPTOR Logic: For small N, use random init to avoid spectral instability
+    # and ensure neighbors/components constraints are met.
+    init_mode = "spectral"
+    if n < 15:
+        init_mode = "random"
+    
     # Global UMAP
-    global_dim = min(dim, n - 2)
+    global_dim = min(dim, max(1, n - 2))
     global_neighbors = max(2, int(np.sqrt(n)))
+    
     reduced_global = umap.UMAP(
         n_neighbors=min(global_neighbors, n-1),
         n_components=global_dim,
         metric="cosine",
+        init=init_mode,  # Stability fix
         random_state=42
     ).fit_transform(embeddings)
     
     global_labels, n_global = gmm_cluster(reduced_global, threshold)
     
-    # Local clustering within each global cluster
+    # Local clustering
     final_labels = [[] for _ in range(n)]
     total_clusters = 0
     
     for g in range(n_global):
         indices = [i for i, labels in enumerate(global_labels) if g in labels]
         
-        if len(indices) <= dim + 1:
-            # Too small - one local cluster
+        if not indices: continue
+        
+        cluster_size = len(indices)
+        
+        # Local UMAP + GMM
+        # Use simple clustering for small local clusters
+        if cluster_size <= dim + 1:
             for i in indices:
                 final_labels[i].append(total_clusters)
             total_clusters += 1
         else:
-            # Local UMAP + GMM
             local_emb = embeddings[indices]
+            
+            local_dim = min(dim, max(1, cluster_size - 2))
+            local_neighbors = max(2, int(np.sqrt(cluster_size)))
+            
+            local_init = "random" if cluster_size < 15 else "spectral"
+            
             reduced_local = umap.UMAP(
-                n_neighbors=min(10, len(indices)-1),
-                n_components=min(dim, len(indices)-2),
+                n_neighbors=min(local_neighbors, cluster_size-1),
+                n_components=local_dim,
                 metric="cosine",
+                init=local_init,
                 random_state=42
             ).fit_transform(local_emb)
             
@@ -162,9 +182,9 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
     return final_labels
 
 
-# ============ TREE BUILDING (minimal changes) ============
+# ============ TREE BUILDING ============
 
-def build_tree(chunks, embedder, summarizer, min_nodes=3):
+def build_tree(chunks, embedder, summarizer, min_nodes=5):
     """
     Build summary tree from chunks.
     
@@ -192,7 +212,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
             "text": chunk["text"],
             "embedding": embeddings[i],
             "children": [],
-            "parents": [],  # <--- Added
+            "parents": [],
             "leaves": [chunk["chunk_id"]]
         }
         current.append(node_id)
@@ -201,7 +221,7 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
     level = 0
     
     # Build higher levels
-    while len(current) >= min_nodes:
+    while len(current) > min_nodes:
         level += 1
         print(f"  Building Level {level} from {len(current)} nodes...")
         
@@ -224,6 +244,11 @@ def build_tree(chunks, embedder, summarizer, min_nodes=3):
                 clusters[c].append(nid)
         
         print(f"    > Found {len(clusters)} clusters. Generating summaries...")
+        
+        # SAFETY CHECK: If no meaningful reduction, stop early to avoid infinite loops
+        if len(clusters) >= len(current):
+            print(f"    ! Warning: No reduction ({len(clusters)} clusters from {len(current)} nodes). Stopping early.")
+            break
 
         # Create parent nodes
         parents = []

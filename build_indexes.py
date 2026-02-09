@@ -90,8 +90,13 @@ def build_inverted_indexes(book_cache_dir):
         for chunk_id in leaf_chunks:
             lookup_id = chunk_id
             if lookup_id not in I_c2e:
-                lookup_id = chunk_id.replace("L0_", "") # Try removing prefix
+                # Try removing prefix (if present)
+                lookup_id = chunk_id.replace("L0_", "")
             
+            if lookup_id not in I_c2e:
+                # Try adding prefix (if missing)
+                lookup_id = f"L0_{chunk_id}"
+                
             for entity in I_c2e.get(lookup_id, []):
                 entities.add(entity)
         I_s2e[node_id] = list(entities)

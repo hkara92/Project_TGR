@@ -27,6 +27,14 @@ You are a knowledge-graph relation extractor. Given a text chunk and a list of e
    - target: entity name (exactly as provided)
    - relation: a short verb phrase (1-5 words), e.g., "loves", "works for", "distrusts", "travels to"
 3. Do NOT treat interjections/utterances (e.g., ‘hoorray’) as entities
+4. RELATION QUALITY RULES (STRICT):
+   - DO NOT output weak communication/reporting verbs as relations:
+     said, says, tell/told, ask/asked, speak/spoke, talk/talked, mention/mentioned, discuss/discussed, reply/replied.
+   - Exception: if the utterance implies a stronger relation, map it to one of these:
+     warns, orders, accuses, threatens, begs, convinces, praises, insults, rejects, agrees_with, argues_with.
+   - Prefer stable, reusable relations (choose the best fit):
+     family_of, friend_of, enemy_of, helps, threatens, protects, works_for, owns, lives_in, travels_to, loves, hates, trusts, distrusts, supports, opposes.
+
 
 
 ---What Counts as a Relationship---
@@ -46,11 +54,11 @@ Do NOT extract:
 Return a JSON array. If no relationships exist, return [].
 
 [
-  {
+  {{
     "source": "...",
     "target": "...",
     "relation": "..."
-  },
+  }},
   ...
 ]
 
@@ -61,21 +69,21 @@ TEXT: Alice glared at Bob across the courtyard. She had trusted him once, but hi
 
 OUTPUT:
 [
-  {
+  {{
     "source": "Alice",
     "target": "Bob",
     "relation": "distrusts"
-  },
-  {
+  }},
+  {{
     "source": "Bob",
     "target": "Alice",
     "relation": "betrayed"
-  },
-  {
+  }},
+  {{
     "source": "Bob",
     "target": "The Castle",
     "relation": "betrayed allies at"
-  }
+  }}
 ]
 
 ---Now Extract---
@@ -156,7 +164,8 @@ def extract_relations_from_chunk(
 
     # Call LLM with error handling
     try:
-        response = call_llm(prompt, model=model, max_tokens=16384)
+        response = call_llm(prompt, model=model, max_tokens=8192)
+        
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
         return None

@@ -411,7 +411,12 @@ def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
         node_id_list = json.load(f)
     
     # Connect Neo4j
-    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    driver = GraphDatabase.driver(
+        neo4j_uri, 
+        auth=(neo4j_user, neo4j_password),
+        notifications_min_severity="WARNING", # Suppress INFO/PERFORMANCE
+        # Or you can disable categories specifically if your driver version supports it
+    )
     with driver.session() as s:
         s.run("RETURN 1")
     

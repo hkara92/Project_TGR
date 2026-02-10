@@ -18,8 +18,8 @@ RUN_MODE = "range"  # Options: "single", "range", "all"
 BOOK_IDX = 0  
 
 # For "range" mode (python range style: start inclusive, end exclusive)
-RANGE_START = 1
-RANGE_END = 10 # Processes 1 to 9
+RANGE_START = 0
+RANGE_END = 5 # Processes 0 to 4
 
 # For "all" mode
 TOTAL_BOOKS = 58

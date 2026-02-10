@@ -48,7 +48,7 @@ def calculate_metrics(answer_folder: str, dataset_name: str) -> Tuple[float, flo
 
     for root, _, files in os.walk(base_path):
         for file in files:
-            if file == "predictions.json":
+            if file in ["predictions.json", "predictions_C2.json"]:
                 full_path = os.path.join(root, file)
                 try:
                     with open(full_path, "r", encoding="utf-8") as f:

@@ -37,7 +37,7 @@ BOOK_ID_TO_EVAL = "0"
 
 # "range" (Inclusive start, Exclusive end)
 RANGE_START = 0 
-RANGE_END = 10 # Processes 0 to 9
+RANGE_END =5 # Processes 0 to 9
 
 # "all"
 TOTAL_BOOKS = 58 
@@ -127,7 +127,7 @@ def evaluate_book(raw_book_id, dataset):
         
         # Call LLM
         try:
-            llm_output = call_llm(prompt, model="gpt", max_tokens=10)
+            llm_output = call_llm(prompt, model="gpt", max_tokens=1000)
         except Exception as e:
             print(f" LLM Error: {e}")
             llm_output = "Z" # Invalid answer

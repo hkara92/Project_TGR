@@ -40,16 +40,19 @@ To run:
 python build_graph.py
 ```
 
-### `run_eval.py`
-This script executes the retrieval and evaluation pipeline:
-*   Implements the adaptive retrieval logic
-*   Queries the LLM (GPT-4o / GPT-5-mini) to answer questions
-*   Supports batch evaluation of multiple books
-
-To run:
+### `C1_run_eval.py` (Step 1: Baseline)
+Executes the baseline retrieval evaluation (Standard E2Retrieval with enhanced graph and tree).
 ```bash
-python run_eval.py
+python C1_run_eval.py
 ```
+- **Output**: `cache/InfiniteChoice/<book_id>/predictions.json`
+
+### `C2_run_eval.py` (Step 2: Region-Restricted)
+Executes the advanced retrieval evaluation using hierarchical region constraints.
+```bash
+python C2_run_eval.py
+```
+- **Output**: `cache/InfiniteChoice/<book_id>/predictions_C2.json`
 
 ### `calculate_metrics.py`
 This script calculates the final evaluation metrics based on the predictions generated:

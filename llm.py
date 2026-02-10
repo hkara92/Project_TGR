@@ -60,7 +60,7 @@ def call_llm(prompt: str, model: str = "gpt", max_tokens: int = 4096) -> str:
             max_output_tokens=max_tokens,
             reasoning={"effort": "low"},
         )
-        # print(json.dumps(resp.model_dump(), indent=2)[:6000])
+        #print(json.dumps(resp.model_dump(), indent=2)[:6000])
         
         # Track usage
         if hasattr(resp, 'usage'):

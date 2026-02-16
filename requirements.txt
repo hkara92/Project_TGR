@@ -1,12 +1,32 @@
-﻿openai
-neo4j
-spacy
-transformers
-tiktoken
-python-dotenv
+﻿# core
 numpy
+python-dotenv
+tqdm
+
+# llm
+openai
+transformers
+accelerate
+tiktoken
+sentence-transformers
+
+# nlp
+spacy
+
+# graph
+neo4j
+
+# vector search
 faiss-cpu
+
+# clustering (summary tree)
 umap-learn
 scikit-learn
-tqdm
+
+# evaluation
 rouge
+pandas
+ragas
+langchain-openai
+datasets
+nest-asyncio

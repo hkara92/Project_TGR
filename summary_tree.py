@@ -20,21 +20,25 @@ from tqdm import tqdm
 
 
 
-# ============ TWO-PROMPT TEMPLATES ============
+LEAF_PROMPT = """Summarize the following text passage from a novel. Include:
+- Main characters and their actions
+- Key plot events
+- Important details (locations, conflicts, revelations)
 
-LEAF_PROMPT = """You are a helpful assistant that summarizes the details of a novel. You will be given a part of a novel. You need to summarize given content. The summary should include the main characters, the main plot and some other details. You need to return the summary in a concise manner without any additional fictive information. The length of the summary should be about 1000 tokens. 
-Here is the text passages:
-TEXT PASSAGES:
+Write 200-300 words. Do NOT add information not in the text. Start your summary immediately without preamble.
+
+TEXT:
 {text}
 
 SUMMARY:"""
 
 
-SUMMARY_PROMPT = """You are a helpful assistant that further summarizes the summaries of a novel. You will be given a series of summaries of parts of a novel. You need to summarize the summaries in a concise manner. The length of the summary should be about 1000 tokens.
-Here is the summaries:
-Summary: {text}
-Now, please synthesize these summaries into a cohesive overview.
-Summary: """
+SUMMARY_PROMPT = """Combine the following summaries into a single cohesive summary. Preserve all key characters, events, and details. Write 200-300 words. Start immediately without preamble.
+
+SUMMARIES:
+{text}
+
+COMBINED SUMMARY:"""
 
 
 def create_summarizer(llm_fn):

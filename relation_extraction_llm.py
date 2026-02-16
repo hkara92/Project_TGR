@@ -1,22 +1,18 @@
 """
-relation_extraction.py
+relation_extraction_llm.py
 
-Simplified LLM-based relation extraction.
-- Minimal prompt, minimal output format
-- Exact entity matching only (case-insensitive canonicalized match)
-- Per-chunk caching
-- Simple merge at the end
+LLM-based relation extraction. Processes each chunk with entity lists,
+extracts relationships, caches results, and merges duplicates into
+weighted edges.
 """
 
 import os
 import re
 import json
-from typing import List, Dict
 
 from llm import call_llm
 
 
-# PROMPT
 PROMPT = """---Goal---
 You are a knowledge-graph relation extractor. Given a text chunk and a list of entities, extract ALL meaningful relationships among the entities.
 
@@ -26,7 +22,7 @@ You are a knowledge-graph relation extractor. Given a text chunk and a list of e
    - source: entity name (exactly as provided)
    - target: entity name (exactly as provided)
    - relation: a short verb phrase (1-5 words), e.g., "loves", "works for", "distrusts", "travels to"
-3. Do NOT treat interjections/utterances (e.g., ‘hoorray’) as entities
+3. Do NOT treat interjections/utterances (e.g., 'hoorray') as entities
 4. RELATION QUALITY RULES (STRICT):
    - DO NOT output weak communication/reporting verbs as relations:
      said, says, tell/told, ask/asked, speak/spoke, talk/talked, mention/mentioned, discuss/discussed, reply/replied.
@@ -40,8 +36,8 @@ You are a knowledge-graph relation extractor. Given a text chunk and a list of e
 ---What Counts as a Relationship---
 Include relationships that are:
 - Explicitly stated ("X married Y")
-- Implied by actions ("X helped Y escape" → X helps Y)
-- Implied by dialogue ("X shouted at Y" → X is angry with Y)
+- Implied by actions ("X helped Y escape" -> X helps Y)
+- Implied by dialogue ("X shouted at Y" -> X is angry with Y)
 - Social, emotional, or hierarchical (friend, enemy, boss, servant)
 - Cooperative or antagonistic
 
@@ -97,42 +93,36 @@ OUTPUT:
 """
 
 
-# ============== CANONICALIZATION ==============
-
 TITLE_PREFIXES = {"mr", "mrs", "ms", "miss", "dr", "sir", "lady", "lord"}
 
 
-def canonicalize(s: str) -> str:
+def canonicalize(s):
     """Normalize entity name (removes title prefixes like Mr., Mrs., etc.)."""
-    s = re.sub(r'\s+', ' ', (s or '').lower().strip())
-    s = re.sub(r'\.', '', s)  # remove dots: "mr." -> "mr"
+    s = re.sub(r"\s+", " ", (s or "").lower().strip())
+    s = re.sub(r"\.", "", s)
     parts = s.split()
     if len(parts) >= 2 and parts[0] in TITLE_PREFIXES:
-        s = " ".join(parts[1:])  # drop title word
+        s = " ".join(parts[1:])
     return s
 
 
-def canonicalize_relation(s: str) -> str:
-    """Normalize relation phrase (no title removal, just lowercase and whitespace)."""
-    return re.sub(r'\s+', ' ', (s or '').lower().strip())
+def canonicalize_relation(s):
+    """Normalize relation phrase."""
+    return re.sub(r"\s+", " ", (s or "").lower().strip())
 
 
-# ============== JSON PARSING ==============
-
-def parse_json_array(text: str) -> List[Dict]:
-    """Extract JSON array from LLM response. Returns None if parsing fails."""
-    text = (text or '').strip()
+def parse_json_array(text):
+    """Extract JSON array from LLM response."""
+    text = (text or "").strip()
     if not text:
         return []
 
-    # Strip markdown code blocks if present
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*', '', text)
+    text = re.sub(r"```json\s*", "", text)
+    text = re.sub(r"```\s*", "", text)
 
-    # Find JSON array (greedy - safer for evidence containing brackets)
-    match = re.search(r'\[.*\]', text, re.DOTALL)
+    match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
-        print(f"[WARN] No JSON array found in LLM response")
+        print("[WARN] No JSON array found in LLM response")
         return None
 
     try:
@@ -143,36 +133,26 @@ def parse_json_array(text: str) -> List[Dict]:
         return None
 
 
-# ============== SINGLE CHUNK EXTRACTION ==============
-
-def extract_relations_from_chunk(
-    chunk_text: str,
-    entities: List[str],
-    model: str = "gpt",
-    verbose: bool = True
-) -> List[Dict]:
+def extract_relations_from_chunk(chunk_text, entities, model="gpt", verbose=True):
     """
     Extract relations from a single chunk.
-    Returns None if extraction failed (to avoid caching empty results).
+    Returns None if extraction failed.
     """
     if len(entities) < 2:
         return []
 
-    # Build prompt
     entity_list = "\n".join(f"- {e}" for e in entities)
     prompt = PROMPT.format(entity_list=entity_list, chunk_text=chunk_text[:8000])
 
-    # Call LLM with error handling
     try:
         response = call_llm(prompt, model=model, max_tokens=8192)
-        
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
         return None
 
     raw_relations = parse_json_array(response)
     if raw_relations is None:
-        print(f"[DEBUG] Parsing failed. Saving response to debug_llm_failure.txt")
+        print("[DEBUG] Parsing failed. Saving response to debug_llm_failure.txt")
         with open("debug_llm_failure.txt", "w", encoding="utf-8") as f:
             f.write(response)
         return None
@@ -180,9 +160,7 @@ def extract_relations_from_chunk(
     if verbose:
         print(f"[DEBUG] {len(entities)} entities | {len(raw_relations)} relations parsed")
 
-    # Canonicalized entity set for matching
     entity_norm_set = {canonicalize(e) for e in entities}
-
     validated = []
     seen = set()
 
@@ -198,61 +176,43 @@ def extract_relations_from_chunk(
 
         s_norm = canonicalize(source)
         t_norm = canonicalize(target)
-        r_norm = canonicalize_relation(relation)  # use relation-specific normalizer
+        r_norm = canonicalize_relation(relation)
 
-        # Must match entity list (canonicalized)
         if s_norm not in entity_norm_set or t_norm not in entity_norm_set:
             continue
 
-        # No self-loops (after canonicalization)
         if s_norm == t_norm:
             continue
 
-        # Deduplicate within chunk (canonicalized)
         key = (s_norm, r_norm, t_norm)
         if key in seen:
             continue
         seen.add(key)
 
-        validated.append({
-            "source": s_norm,
-            "relation": r_norm,
-            "target": t_norm
-        })
+        validated.append({"source": s_norm, "relation": r_norm, "target": t_norm})
 
     return validated
 
 
-# ============== BATCH PROCESSING WITH CACHE ==============
-
-def get_cache_path(cache_dir: str, chunk_id: str) -> str:
+def get_cache_path(cache_dir, chunk_id):
     """Get cache file path for a chunk."""
-    safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', chunk_id)
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", chunk_id)
     return os.path.join(cache_dir, "relations", f"{safe_id}.json")
 
 
-def extract_relations_batch(
-    chunks: List[Dict],
-    I_c2e: Dict[str, List[str]],
-    llm_choice: str = "gpt",
-    cache_dir: str = "./cache"
-) -> List[Dict]:
+def extract_relations_batch(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"):
     """
     Extract relations from all chunks with caching.
-
-    Returns:
-        List of all relation dicts with chunk_id added
+    Returns list of all relation dicts with chunk_id added.
     """
     relations_dir = os.path.join(cache_dir, "relations")
     os.makedirs(relations_dir, exist_ok=True)
 
     all_relations = []
     to_process = []
-
     skipped = 0
     cached = 0
 
-    # Check cache
     for chunk in chunks:
         chunk_id = f"L0_{chunk['chunk_id']}"
         entities = I_c2e.get(chunk_id, [])
@@ -265,8 +225,7 @@ def extract_relations_batch(
 
         if os.path.exists(cache_path):
             cached += 1
-            # Load from cache (use copy to avoid mutation)
-            with open(cache_path, 'r', encoding="utf-8") as f:
+            with open(cache_path, "r", encoding="utf-8") as f:
                 cached_obj = json.load(f)
             for rel in cached_obj.get("relations", []):
                 rel_copy = rel.copy()
@@ -277,7 +236,6 @@ def extract_relations_batch(
 
     print(f"Relation extraction: {len(to_process)} to process, cached={cached}, skipped(<2 ents)={skipped}")
 
-    # Process remaining chunks
     for i, chunk in enumerate(to_process):
         chunk_id = f"L0_{chunk['chunk_id']}"
         text = chunk["text"]
@@ -288,12 +246,10 @@ def extract_relations_batch(
         relations = extract_relations_from_chunk(text, entities, model=llm_choice, verbose=False)
 
         if relations is not None:
-            # Save to cache ONLY if successful
             cache_path = get_cache_path(cache_dir, chunk_id)
-            with open(cache_path, 'w', encoding="utf-8") as f:
+            with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump({"chunk_id": chunk_id, "relations": relations}, f, indent=2, ensure_ascii=False)
 
-            # Add to results
             for rel in relations:
                 rel_copy = rel.copy()
                 rel_copy["chunk_id"] = chunk_id
@@ -307,14 +263,11 @@ def extract_relations_batch(
     return all_relations
 
 
-# ============== MERGE INTO WEIGHTED EDGES ==============
-
-def merge_relations(relations: List[Dict]) -> List[Dict]:
+def merge_relations(relations):
     """
     Merge duplicate relations across chunks into weighted edges.
-    Keeps up to 3 UNIQUE evidences.
     """
-    edge_map = {}  # (source, relation, target) -> edge dict
+    edge_map = {}
 
     for rel in relations:
         key = (rel["source"], rel["relation"], rel["target"])
@@ -325,7 +278,7 @@ def merge_relations(relations: List[Dict]) -> List[Dict]:
                 "relation": rel["relation"],
                 "target": rel["target"],
                 "weight": 0,
-                "chunk_ids": []
+                "chunk_ids": [],
             }
 
         edge = edge_map[key]
@@ -339,33 +292,24 @@ def merge_relations(relations: List[Dict]) -> List[Dict]:
     return edges
 
 
-# ============== SAVE / LOAD ==============
-
-def save_edges(edges: List[Dict], cache_dir: str):
+def save_edges(edges, cache_dir):
     """Save merged edges to JSON."""
     filepath = os.path.join(cache_dir, "edges.json")
-    with open(filepath, 'w', encoding="utf-8") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         json.dump(edges, f, indent=2, ensure_ascii=False)
     print(f"Saved {len(edges)} edges to {filepath}")
 
 
-def load_edges(cache_dir: str) -> List[Dict]:
+def load_edges(cache_dir):
     """Load merged edges from JSON."""
     filepath = os.path.join(cache_dir, "edges.json")
-    with open(filepath, 'r', encoding="utf-8") as f:
+    with open(filepath, "r", encoding="utf-8") as f:
         edges = json.load(f)
     print(f"Loaded {len(edges)} edges from {filepath}")
     return edges
 
 
-# ============== MAIN ENTRY POINT ==============
-
-def extract_and_merge_relations(
-    chunks: List[Dict],
-    I_c2e: Dict[str, List[str]],
-    llm_choice: str = "gpt",
-    cache_dir: str = "./cache"
-) -> List[Dict]:
+def extract_and_merge_relations(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"):
     """Full pipeline: extract relations from chunks and merge into edges."""
     relations = extract_relations_batch(chunks, I_c2e, llm_choice, cache_dir)
     edges = merge_relations(relations)

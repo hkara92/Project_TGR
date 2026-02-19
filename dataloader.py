@@ -158,6 +158,57 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
     return results
 
 
+def load_infinite_qa(data_path: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Load InfiniteQA (InfiniteBench longbook_qa_eng) dataset.
+    This is an open-ended QA task (no multiple-choice options).
+    Returns:
+        Dict keyed by book_id with unified format
+    """
+    context_to_data = {}
+
+    with open(data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Skipping invalid JSON line: {e}")
+                continue
+
+            context = item["context"]
+            question = item["input"]
+            # answer is a list of strings; join them
+            raw_answer = item["answer"]
+            if isinstance(raw_answer, list):
+                answer = "; ".join(raw_answer)
+            else:
+                answer = str(raw_answer)
+
+            if context not in context_to_data:
+                context_to_data[context] = []
+
+            context_to_data[context].append({
+                "question": question,
+                "options": [],       # open-ended, no options
+                "answer": answer
+            })
+
+    results = {}
+    for i, (context, qa_pairs) in enumerate(context_to_data.items()):
+        book_id = str(i)
+        results[book_id] = {
+            "book_text": context,
+            "qa_pairs": qa_pairs
+        }
+
+    print(f"Loaded {len(results)} books from InfiniteQA")
+    return results
+
+
 def load_dataset(dataset_name: str, data_path: str) -> Dict[str, Dict[str, Any]]:
     """
     Unified dataset loader.
@@ -167,53 +218,9 @@ def load_dataset(dataset_name: str, data_path: str) -> Dict[str, Dict[str, Any]]
         return load_novelqa(data_path)
     elif dataset_name == "InfiniteChoice":
         return load_infinite_choice(data_path)
+    elif dataset_name == "InfiniteQA":
+        return load_infinite_qa(data_path)
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Use 'NovelQA' or 'InfiniteChoice'")
+        raise ValueError(f"Unknown dataset: {dataset_name}. Use 'NovelQA', 'InfiniteChoice', or 'InfiniteQA'")
 
 
-
-# example usage
-if __name__ == "__main__":
-    # Example usage - adjust paths as needed
-    
-    # Test NovelQA (if available)
-    novelqa_path = "./data/NovelQA"
-    if os.path.exists(novelqa_path):
-        books = load_novelqa(novelqa_path)
-        if books:
-            # Get first book_id
-            first_id = list(books.keys())[1]
-            book = books[first_id]
-            
-            print(f"\n--- NovelQA Sample ---")
-            print(f"Book ID: {first_id}")
-            print(f"Book text length: {len(book['book_text'])} chars")
-            print(f"Number of QA pairs: {len(book['qa_pairs'])}")
-            if book['qa_pairs']:
-                qa = book['qa_pairs'][1]
-                print(f"Sample question: {qa['question'][:100]}...")
-                print(f"Options: {qa['options']}")
-                print(f"Answer: {qa['answer']}")
-    else:
-        print(f"NovelQA not found at {novelqa_path}")
-    
-    # Test InfiniteChoice (if available)
-    infinite_path = "./data/InfiniteBench/longbook_choice_eng.jsonl"
-    if os.path.exists(infinite_path):
-        books = load_infinite_choice(infinite_path)
-        if books:
-            # Get first book_id
-            first_id = list(books.keys())[0]
-            book = books[first_id]
-            
-            print(f"\n--- InfiniteChoice Sample ---")
-            print(f"Book ID: {first_id}")
-            print(f"Book text length: {len(book['book_text'])} chars")
-            print(f"Number of QA pairs: {len(book['qa_pairs'])}")
-            if book['qa_pairs']:
-                qa = book['qa_pairs'][0]
-                print(f"Sample question: {qa['question'][:100]}...")
-                print(f"Options: {[opt[:30] + '...' if len(opt) > 30 else opt for opt in qa['options']]}")
-                print(f"Answer: {qa['answer']}")
-    else:
-        print(f"InfiniteChoice not found at {infinite_path}")

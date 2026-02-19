@@ -37,8 +37,8 @@ from build_indexes import extract_all_indexes
 # config
 LLM_CHOICE = "qwen"
 EMBEDDER_MODEL = "bge" if LLM_CHOICE == "qwen" else "text-embedding-3-large"
-DATASET_NAME = "InfiniteChoice"
-DATASET_PATH = "./data/InfiniteBench/longbook_choice_eng.jsonl"
+DATASET_NAME = "InfiniteQA"
+DATASET_PATH = "./data/InfiniteBench/longbook_qa_eng.jsonl"
 CACHE_DIR = "./cache"
 CHUNK_SIZE = 1200
 OVERLAP = 100

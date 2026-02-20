@@ -37,6 +37,9 @@ NER_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP", "EVENT"}
 
 def extract_entities(text, nlp):
     """Extract and normalize named entities from text."""
+    if "\nA. " in text:
+        text = text.split("\nA. ")[0]
+
     doc = nlp(text)
     entities = []
     seen = set()

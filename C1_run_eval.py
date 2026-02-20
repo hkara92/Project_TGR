@@ -17,6 +17,7 @@ import time
 from C1_retrieval import load_retriever_from_cache
 from dataloader import load_dataset
 from llm import get_embeddings, call_llm, unload_model
+from prompts import PROMPT_CHOICE, PROMPT_OPEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,21 +39,8 @@ NEO4J_PASSWORD = "testpassword"
 MAX_CHUNKS = 25
 SHORTEST_PATH_K = 4
 
-QA_PROMPT = """You are a helpful assistant. You are given a question and evidence. 
-Please answer based ONLY on the evidence. 
-The answer must be exactly one of the options: "A", "B", "C", or "D".
-Do NOT explain your reasoning. Output ONLY the single letter.
-
-Question: {question}
-Evidence: {evidence}
-
-Answer: """
-
-
-def format_options(options_list):
-    """Format options into A. ... B. ... string."""
-    labels = ["A", "B", "C", "D"]
-    return "\n".join([f"{labels[i]}. {opt}" for i, opt in enumerate(options_list)])
+MAX_CHUNKS = 25
+SHORTEST_PATH_K = 4
 
 
 def embed_wrapper(text):
@@ -98,37 +86,42 @@ def evaluate_book(raw_book_id, dataset):
 
     for i, qa in enumerate(qa_pairs):
         q_graph = qa["question"]
-        q_dense = f"{qa['question']}\n{format_options(qa['options'])}"
+        q_dense = qa["question"]
 
         # retrieve evidence
         result = retriever.query(question=q_graph, full_query=q_dense)
         evidence_text = result["chunks"]
 
-        # generate answer
-        question_with_opts = f"{qa['question']}\nOptions:\n{format_options(qa['options'])}"
-        prompt = QA_PROMPT.format(question=question_with_opts, evidence=evidence_text)
+        # Select prompt based on whether we have options
+        # Select prompt
+        prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
+        final_prompt = prompt_template.format(question=qa["question"], evidence=evidence_text)
 
         try:
-            llm_output = call_llm(prompt, model="qwen", max_tokens=1000)
+            llm_output = call_llm(final_prompt, model="qwen", max_tokens=1000)
         except Exception as e:
             print(f"  LLM error: {e}")
             llm_output = "Z"
 
-        # extract the predicted letter
-        cleaned = llm_output.strip().upper()
-        final_pred = "Z"
+        if qa["options"]:
+            # extract the predicted letter
+            cleaned = llm_output.strip().upper()
+            final_pred = "Z"
 
-        match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\.|:|\)|$|\s)", cleaned)
-        if match:
-            final_pred = match.group(1)
-        else:
-            match = re.search(r"ANSWER\s*:\s*([A-D])", cleaned)
+            match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\.|:|\)|$|\s)", cleaned)
             if match:
                 final_pred = match.group(1)
             else:
-                match = re.search(r"\b([A-D])\b", cleaned)
+                match = re.search(r"ANSWER\s*:\s*([A-D])", cleaned)
                 if match:
                     final_pred = match.group(1)
+                else:
+                    match = re.search(r"\b([A-D])\b", cleaned)
+                    if match:
+                        final_pred = match.group(1)
+        else:
+            # For open QA, just take the raw output
+            final_pred = llm_output.strip()
 
         # ground truth text
         labels = ["A", "B", "C", "D"]

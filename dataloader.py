@@ -139,8 +139,12 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
             if context not in context_to_data:
                 context_to_data[context] = []
             
+            # Augment question with options for retrieval context
+            formatted_options = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(options)])
+            augmented_question = f"{question}\n{formatted_options}"
+
             context_to_data[context].append({
-                "question": question,
+                "question": augmented_question,  # Now includes options
                 "options": options,
                 "answer": answer_letter
             })

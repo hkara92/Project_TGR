@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from C2_retrieval import load_retriever, retrieve
 from dataloader import load_dataset
 from llm import get_embeddings, call_llm, unload_model
+from prompts import PROMPT_CHOICE, PROMPT_OPEN
 
 # config
 DATASET_NAME = "InfiniteChoice"
@@ -30,16 +31,6 @@ TARGET_BOOK_ID = 0           # used in single mode
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
-
-QA_PROMPT = """You are a helpful assistant. You are given a question and evidence. 
-Please answer based ONLY on the evidence. 
-The answer must be exactly one of the options: "A", "B", "C", or "D".
-Do NOT explain your reasoning. Output ONLY the single letter.
-
-Question: {question}
-Evidence: {evidence}
-
-Answer:"""
 
 
 def get_batch_embeddings(texts):
@@ -123,12 +114,19 @@ def evaluate_book(book_idx, dataset):
             retrieval_res = {}
 
         # build prompt and generate answer
-        options_text = "\n".join([f"{chr(65+j)}. {opt}" for j, opt in enumerate(qa["options"])])
-        full_q = f"{qa['question']}\nOptions:\n{options_text}"
+        # Select prompt
+        full_q = qa["question"]
+        prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
 
-        prompt = QA_PROMPT.format(question=full_q, evidence=context)
+        prompt = prompt_template.format(question=full_q, evidence=context)
         llm_response = call_llm(prompt, model="qwen", max_tokens=1000)
-        prediction = extract_answer(llm_response)
+
+        if qa["options"]:
+            prediction = extract_answer(llm_response)
+            ground_truth_text = qa["options"][ord(qa["answer"]) - 65] if "A" <= qa["answer"] <= "D" else ""
+        else:
+            prediction = llm_response.strip()
+            ground_truth_text = qa["answer"]
 
         # store result
         results.append({
@@ -136,7 +134,7 @@ def evaluate_book(book_idx, dataset):
             "question": qa["question"],
             "options": qa["options"],
             "ground_truth": qa["answer"],
-            "ground_truth_text": qa["options"][ord(qa["answer"]) - 65] if "A" <= qa["answer"] <= "D" else "",
+            "ground_truth_text": ground_truth_text,
             "prediction": prediction,
             "raw_response": llm_response,
             "evidence": context,

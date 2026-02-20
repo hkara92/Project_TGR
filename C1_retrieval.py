@@ -1,13 +1,6 @@
 """
-E²GraphRAG-style Retriever
-==========================
-Implements E²GraphRAG retrieval strategy with Neo4j graph, FAISS index, and custom tree structure.
-
-Retrieval Modes:
-1. Global Search: Dense retrieval when no entities found
-2. Local Search: Graph-based entity pair retrieval  
-3. Occurrence Rerank: Dense + entity filtering when local returns 0
-4. EntityAware Filter: When iterative tightening hits 0
+Retriever module combining Neo4j graph traversal with FAISS dense retrieval.
+Supports global (dense), local (graph), and hybrid retrieval strategies.
 """
 
 import json
@@ -58,12 +51,12 @@ class Retriever:
         
         logger.info(f"Retriever initialized: {len(tree)} nodes, {len(I_e2c)} entities")
 
-    # -------------------------------------------------------------------------
-    # ENTITY EXTRACTION
-    # -------------------------------------------------------------------------
-    
     def extract_query_entities(self, query: str) -> List[str]:
         """Extract and canonicalize entities from query using SpaCy NER."""
+        # If query contains options (starts with 'A. '), extract only the question part
+        if "\nA. " in query:
+            query = query.split("\nA. ")[0]
+
         doc = self.nlp(query)
         entities = set()
         
@@ -80,10 +73,6 @@ class Retriever:
         
         return list(entities)
 
-    # -------------------------------------------------------------------------
-    # GRAPH OPERATIONS (Neo4j)
-    # -------------------------------------------------------------------------
-    
     def graph_filter(self, entities: List[str], k: int) -> List[Tuple[str, str]]:
         """Find entity pairs with shortest path <= k hops in Neo4j."""
         pairs = []
@@ -110,10 +99,6 @@ class Retriever:
             logger.debug(f"No path {e1}-{e2}: {e}")
             return None
 
-    # -------------------------------------------------------------------------
-    # INDEX MAPPING & KEY MERGING
-    # -------------------------------------------------------------------------
-    
     def index_mapping(self, entities: list) -> Dict[str, List[str]]:
         """Map entities/pairs to chunk IDs. Pairs use intersection."""
         chunk_ids = {}
@@ -155,10 +140,6 @@ class Retriever:
         
         return merged
 
-    # -------------------------------------------------------------------------
-    # RETRIEVAL METHODS
-    # -------------------------------------------------------------------------
-    
     def local_retrieval(self, entities: List[str], k: int, allow_fallback: bool = True) -> Dict[str, List[str]]:
         """Graph-based retrieval: find pairs -> map to chunks -> merge keys."""
         if len(entities) < 2:
@@ -184,10 +165,6 @@ class Retriever:
                       if 0 <= i < len(self.node_id_list)]
         return {"": candidates}
 
-    # -------------------------------------------------------------------------
-    # RANKING METHODS
-    # -------------------------------------------------------------------------
-    
     def occurrence_ranking(self, candidates: List[str], entities: List[str], 
                           top_k: int) -> Dict[str, List[str]]:
         """Rank candidates by entity occurrence count."""
@@ -221,10 +198,6 @@ class Retriever:
             result.setdefault(key, []).append(item["node"])
         return self.merge_keys(result)
 
-    # -------------------------------------------------------------------------
-    # HELPERS
-    # -------------------------------------------------------------------------
-    
     def _count_entity_matches(self, node_id: str, entities: List[str]) -> int:
         """Count query entities present in a node."""
         chunk_id = node_id  # IDs are now aligned (L0_chunk_X)
@@ -288,10 +261,6 @@ class Retriever:
                 parts.append(f"{key}: {text}" if key else text)
         return "\n\n".join(parts)
 
-    # -------------------------------------------------------------------------
-    # MAIN QUERY METHOD
-    # -------------------------------------------------------------------------
-    
     def query(self, question: str, full_query: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
         Main retrieval implementing E²GraphRAG adaptive strategy.
@@ -378,10 +347,6 @@ class Retriever:
             "chunk_counts_history": history
         }
 
-
-# =============================================================================
-# LOADER FUNCTION
-# =============================================================================
 
 def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
                               neo4j_user: str, neo4j_password: str,

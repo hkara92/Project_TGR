@@ -21,19 +21,14 @@ import numpy as np
 import faiss
 import spacy
 
-try:
-    from rapidfuzz import fuzz as _fuzz
-    _FUZZY = True
-except ImportError:
-    _FUZZY = False
-    print("[WARN] rapidfuzz not installed: pip install rapidfuzz --break-system-packages")
+from rapidfuzz import fuzz as _fuzz
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "tree_top_m": 10,               # summary nodes kept after cross-encoder
     "use_tree_rerank": True,
-    "max_hops": 1,                  # 1 or 2
+    "max_hops": 2,                  # 1 or 2
     "max_candidates": 50,
     "max_chunks_per_entity": 10,
     "use_entity_mention_chunks": True,
@@ -75,8 +70,6 @@ def extract_entities(text, nlp):
 
 def fuzzy_match(query_entities, E_region, threshold=85, min_len=5):
     """Match query entities to E_region using fuzzy string similarity."""
-    if not _FUZZY:
-        return [e for e in query_entities if e in E_region]
     matched = set()
     for qe in query_entities:
         if len(qe) < min_len:
@@ -117,7 +110,9 @@ def mmr_select(query, candidates, embedder_func, top_k, lambda_param=0.5, chunk_
         emb_list = []
         for c in candidates:
             node_id = f"L0_{c['chunk_id']}" if not c["chunk_id"].startswith("L0_") else c["chunk_id"]
-            emb = chunk_embs.get(node_id) or chunk_embs.get(c["chunk_id"])
+            emb = chunk_embs.get(node_id)
+            if emb is None:
+                emb = chunk_embs.get(c["chunk_id"])
             if emb is None:
                 # Fallback: embed on the fly if missing from precomputed
                 emb = np.array(embedder_func([c["text"]])[0]).astype("float32")
@@ -215,7 +210,8 @@ def define_region(summary_ids, tree_nodes, I_s2e):
     C_region, E_region = set(), set()
     for sid in summary_ids:
         for leaf in tree_nodes.get(sid, {}).get("leaves", []):
-            C_region.add(leaf[3:] if leaf.startswith("L0_") else leaf)
+            # Normalize to "L0_chunk_X" format regardless of what leaves stored
+            C_region.add(leaf if leaf.startswith("L0_") else f"L0_{leaf}")
         E_region.update(I_s2e.get(sid, []))
     print(f"[Region] C_region={len(C_region)} chunks, E_region={len(E_region)} entities")
     return C_region, E_region
@@ -257,13 +253,20 @@ def traverse_graph(seeds, E_region, C_region, book_id, driver, max_hops=1):
         RETURN source, target, relation, weight, evidence
         """
     else:
+        # 2-hop: seed -> middle -> target
+        # book_id is checked on ALL three nodes and both relationships
+        # to prevent cross-book contamination (entity names are not unique across books).
         cypher = """
-        MATCH (s:Entity)-[r1:RELATION]-(m:Entity)-[r2:RELATION]-(n:Entity)
-        WHERE s.book_id = $book_id AND s.name IN $seeds
-          AND m.name IN $e_region AND n.name IN $e_region
+        MATCH (s:Entity {book_id: $book_id})-[r1:RELATION {book_id: $book_id}]-
+              (m:Entity {book_id: $book_id})-[r2:RELATION {book_id: $book_id}]-
+              (n:Entity {book_id: $book_id})
+        WHERE s.name IN $seeds
+          AND m.name IN $e_region
+          AND n.name IN $e_region
           AND m <> s AND n <> s AND n <> m
         WITH s.name AS src, m.name AS mid, n.name AS tgt,
-             r1.relation AS rel1, r2.relation AS rel2, r1.weight AS w1, r2.weight AS w2,
+             r1.relation AS rel1, r2.relation AS rel2,
+             r1.weight AS w1, r2.weight AS w2,
              [c IN r1.chunk_ids WHERE c IN $c_region] AS ev1,
              [c IN r2.chunk_ids WHERE c IN $c_region] AS ev2
         WHERE SIZE(ev1) > 0 OR SIZE(ev2) > 0
@@ -306,13 +309,17 @@ def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
     chunk_data = {}  # chunk_id -> {is_edge_evidence, sources}
 
     # Source A: edge evidence chunks
+    # edge_count tracks how many distinct edges point to this chunk.
+    # A chunk cited by many edges is central to the local graph neighborhood
+    # and more likely to contain the answer than a chunk cited by one edge.
     for rec in records:
         for cid in rec["evidence"]:
             if cid not in chunk_data:
-                chunk_data[cid] = {"is_edge_evidence": True, "sources": {"edge"}}
+                chunk_data[cid] = {"is_edge_evidence": True, "sources": {"edge"}, "edge_count": 1}
             else:
                 chunk_data[cid]["is_edge_evidence"] = True
                 chunk_data[cid]["sources"].add("edge")
+                chunk_data[cid]["edge_count"] = chunk_data[cid].get("edge_count", 0) + 1
     print(f"[Candidates] Edge evidence: {len(chunk_data)} chunks.")
 
     # Source B: entity mention chunks (optional)
@@ -333,15 +340,23 @@ def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
         if not text:
             continue
         candidates.append({
-            "chunk_id":           cid,
-            "text":               text,
-            "sources":            data["sources"],
-            "is_edge_evidence":   data["is_edge_evidence"],
-            "query_entity_count": len(q_ents & set(I_c2e.get(cid, []))),
-            "score":              0.0,
+            "chunk_id":            cid,
+            "text":                text,
+            "sources":             data["sources"],
+            "is_edge_evidence":    data["is_edge_evidence"],
+            "edge_evidence_count": data.get("edge_count", 0),  # how many edges cite this chunk
+            "query_entity_count":  len(q_ents & set(I_c2e.get(cid, []))),
+            "score":               0.0,
         })
 
-    candidates.sort(key=lambda x: (x["is_edge_evidence"], x["query_entity_count"]), reverse=True)
+    # Sort priority:
+    #   1. is_edge_evidence   — edge-backed chunks ranked above entity-mention-only chunks
+    #   2. edge_evidence_count — among edge chunks, prefer those cited by more edges
+    #   3. query_entity_count  — tiebreaker: prefer chunks mentioning more query entities
+    candidates.sort(
+        key=lambda x: (x["is_edge_evidence"], x["edge_evidence_count"], x["query_entity_count"]),
+        reverse=True
+    )
     candidates = candidates[:config["max_candidates"]]
     print(f"[Candidates] Final pool: {len(candidates)} chunks.")
     return candidates
@@ -387,7 +402,8 @@ def tree_only_fallback(question_only, C_region, I_c2e, query_entities,
         })
     candidates.sort(key=lambda x: x["query_entity_count"], reverse=True)
     candidates = candidates[:config["max_candidates"]]
-    candidates = mmr_select(question_only, candidates, embedder_func, config["mmr_top_k"], config["mmr_lambda"], chunk_embs=chunk_embs)
+    candidates = mmr_select(question_only, candidates, embedder_func,
+                            config["mmr_top_k"], config["mmr_lambda"], chunk_embs=chunk_embs)
     return rerank_chunks(question_only, candidates, cross_encoder, config["final_top_k"])
 
 
@@ -441,7 +457,7 @@ def retrieve(question, options, resources, config=None):
     print(f"[Retrieve] Q: {question_only[:80]}...")
 
     # Step 1: entity extraction (question only)
-    query_entities        = extract_entities(question_only, nlp)
+    query_entities          = extract_entities(question_only, nlp)
     stats["query_entities"] = query_entities
     print(f"[Entities] {query_entities}")
 
@@ -459,14 +475,14 @@ def retrieve(question, options, resources, config=None):
                             [], "fallback_no_summaries", stats)
 
     # Step 4: define region
-    C_region, E_region        = define_region(top_summaries, tree_nodes, I_s2e)
-    stats["region_chunks"]     = len(C_region)
-    stats["region_entities"]   = len(E_region)
+    C_region, E_region      = define_region(top_summaries, tree_nodes, I_s2e)
+    stats["region_chunks"]  = len(C_region)
+    stats["region_entities"]= len(E_region)
 
     # Step 5: seed selection (fuzzy matching only, no frequency fallback)
-    seeds, seed_strategy       = select_seeds(query_entities, E_region, cfg)
-    stats["seeds"]             = seeds
-    stats["seed_strategy"]     = seed_strategy
+    seeds, seed_strategy    = select_seeds(query_entities, E_region, cfg)
+    stats["seeds"]          = seeds
+    stats["seed_strategy"]  = seed_strategy
 
     if not seeds:
         fb = tree_only_fallback(question_only, C_region, I_c2e, query_entities,
@@ -476,6 +492,7 @@ def retrieve(question, options, resources, config=None):
                             [], f"fallback_{seed_strategy}", stats)
 
     # Step 6: graph traversal (1-hop or 2-hop within region)
+    print(f"[Step 6] Graph traversal  max_hops={cfg['max_hops']}  seeds={seeds}")
     try:
         records, visited = traverse_graph(seeds, E_region, C_region,
                                           book_id, neo4j_driver, cfg["max_hops"])
@@ -484,14 +501,17 @@ def retrieve(question, options, resources, config=None):
         records, visited = [], set(seeds)
 
     stats["relations_found"] = len(records)
+    print(f"[Step 6] Result: {len(records)} edges found, {len(visited)} entities visited")
 
     # Step 7: collect candidates (deduplicated by chunk_data dict)
     candidates                     = collect_candidates(records, visited, C_region,
                                                         I_e2c, I_c2e, query_entities,
                                                         tree_nodes, cfg)
     stats["candidates_before_mmr"] = len(candidates)
+    print(f"[Step 7] Candidates after graph collection: {len(candidates)}")
 
     if len(candidates) < cfg["min_candidates"]:
+        print(f"[Step 7] Too few candidates (<{cfg['min_candidates']}), using fallback.")
         fb = tree_only_fallback(question_only, C_region, I_c2e, query_entities,
                                 tree_nodes, embedder_func, cross_encoder, cfg,
                                 chunk_embs=resources.get("chunk_embs"))
@@ -503,16 +523,17 @@ def retrieve(question, options, resources, config=None):
                                                cfg["mmr_top_k"], cfg["mmr_lambda"],
                                                chunk_embs=resources.get("chunk_embs"))
     stats["candidates_after_mmr"] = len(candidates)
+    print(f"[Step 8] After MMR: {len(candidates)} chunks")
 
     # Step 9: cross-encoder rerank (question only, no options) -> top 15
-    top_chunks              = rerank_chunks(question_only, candidates,
-                                            cross_encoder, cfg["final_top_k"])
-    stats["final_chunks"]   = len(top_chunks)
+    top_chunks            = rerank_chunks(question_only, candidates,
+                                          cross_encoder, cfg["final_top_k"])
+    stats["final_chunks"] = len(top_chunks)
+    print(f"[Step 9] After cross-encoder rerank: {len(top_chunks)} chunks")
 
     # Step 10: Lost-in-the-Middle reorder before passing to LLM
     top_chunks = lost_in_middle_reorder(top_chunks)
-
-    print(f"[Retrieve] Done. mode=graph_traversal, chunks={len(top_chunks)}")
+    print(f"[Step 10] After Lost-in-Middle reorder: {len(top_chunks)} chunks -> sending to LLM")
     print(f"{'='*60}\n")
     return build_result(top_chunks, query_entities, seeds, "graph_traversal", stats)
 
@@ -535,7 +556,7 @@ def load_retriever(cache_dir, book_id, neo4j_uri, neo4j_user, neo4j_password,
     # Load precomputed embeddings for all nodes (L0 chunks + summary nodes)
     # These were saved during indexing in save_tree() -> embeddings.npz
     # Used by MMR to avoid re-embedding chunks at query time
-    raw_embs  = np.load(os.path.join(cache_dir, "summary_tree", "embeddings.npz"))
+    raw_embs   = np.load(os.path.join(cache_dir, "summary_tree", "embeddings.npz"))
     chunk_embs = {nid: raw_embs[nid].astype("float32") for nid in raw_embs.files}
 
     resources = {

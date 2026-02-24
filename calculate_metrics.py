@@ -3,8 +3,9 @@ import json
 from rouge import Rouge
 from sklearn.metrics import confusion_matrix, classification_report, f1_score
 
-DATASET_NAME = "InfiniteChoice"   # or "InfiniteQA"
-CACHE_ROOT   = "./cache"
+DATASET_NAME    = "InfiniteChoice"      # or "InfiniteQA"
+CACHE_ROOT      = "./cache"
+PREDICTION_FILE = "predictions_C2.json" # "predictions.json" for C1, "predictions_C2.json" for C2
 
 CHOICE_LABELS = ["A", "B", "C", "D"]
 
@@ -27,13 +28,13 @@ def rouge_l(pred, gold):
         return 0.0
 
 
-def load_predictions(cache_root, dataset_name):
+def load_predictions(cache_root, dataset_name, pred_file):
     """Walk cache folder and return all prediction records as a flat list."""
     records = []
     base = os.path.join(cache_root, dataset_name)
     for root, _, files in os.walk(base):
         for fname in files:
-            if fname in ("predictions.json", "predictions_C2.json"):
+            if fname == pred_file:
                 try:
                     records.extend(json.load(open(os.path.join(root, fname), encoding="utf-8")))
                 except Exception as e:
@@ -79,7 +80,7 @@ def calculate_classification_metrics(records):
     }
 
 
-def calculate_timing(cache_root, dataset_name):
+def calculate_timing(cache_root, dataset_name, pred_file):
     """Collect tree build times, eval times, and per-question retrieval times."""
     base = os.path.join(cache_root, dataset_name)
     tree_times, eval_times, retrieval_times = [], [], []
@@ -100,26 +101,25 @@ def calculate_timing(cache_root, dataset_name):
                 except:
                     pass
 
-        for pf in ("predictions.json", "predictions_C2.json"):
-            pp = os.path.join(bp, pf)
-            if os.path.exists(pp):
-                try:
-                    for qa in json.load(open(pp, encoding="utf-8")):
-                        t = qa.get("retrieval_time")
-                        if t is not None:
-                            retrieval_times.append(float(t))
-                except:
-                    pass
+        pp = os.path.join(bp, pred_file)
+        if os.path.exists(pp):
+            try:
+                for qa in json.load(open(pp, encoding="utf-8")):
+                    t = qa.get("retrieval_time")
+                    if t is not None:
+                        retrieval_times.append(float(t))
+            except:
+                pass
 
     return tree_times, eval_times, retrieval_times
 
 
 if __name__ == "__main__":
-    records = load_predictions(CACHE_ROOT, DATASET_NAME)
+    records = load_predictions(CACHE_ROOT, DATASET_NAME, PREDICTION_FILE)
     sep = "=" * 45
 
     print(f"\n{sep}")
-    print(f"  RESULTS  -  {DATASET_NAME}  ({len(records)} questions)")
+    print(f"  RESULTS  -  {DATASET_NAME}  [{PREDICTION_FILE}]  ({len(records)} questions)")
     print(sep)
 
     if DATASET_NAME == "InfiniteChoice":
@@ -150,7 +150,7 @@ if __name__ == "__main__":
         print(f"  Rouge-L (F1)   : {rl:.4f}")
 
     # Timing
-    tree_times, eval_times, retrieval_times = calculate_timing(CACHE_ROOT, DATASET_NAME)
+    tree_times, eval_times, retrieval_times = calculate_timing(CACHE_ROOT, DATASET_NAME, PREDICTION_FILE)
     print(f"{sep}")
     print("  TIMING")
     print(sep)

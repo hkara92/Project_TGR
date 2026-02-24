@@ -16,11 +16,12 @@ import time
 
 from C1_retrieval import load_retriever_from_cache
 from dataloader import load_dataset
-from llm import get_embeddings, call_llm, unload_model
+from llm import get_embeddings, call_llm, unload_model, preload_models
 from prompts import PROMPT_CHOICE, PROMPT_OPEN
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 # config
 DATASET_NAME = "InfiniteChoice"
@@ -29,15 +30,15 @@ DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl"
 RUN_MODE = "range"       # "single", "range", or "all"
 BOOK_ID_TO_EVAL = "0"    # for single mode
 RANGE_START = 0           # for range mode
-RANGE_END = 5
+RANGE_END = 25
 TOTAL_BOOKS = 58          # for all mode
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
 
-MAX_CHUNKS = 25
-SHORTEST_PATH_K = 4
+# Options: "qwen", "gpt", "lmstudio"
+LLM_MODEL_NAME = "qwen"
 
 MAX_CHUNKS = 25
 SHORTEST_PATH_K = 4
@@ -45,6 +46,41 @@ SHORTEST_PATH_K = 4
 
 def embed_wrapper(text):
     return np.array(get_embeddings([text], model="bge")[0])
+
+
+def extract_answer(llm_output):
+    """
+    Extract A/B/C/D from LLM output.
+
+    Priority order:
+    1. Clean single-letter answer at start: "A", "A.", "A:" with nothing after
+       (what the prompt asks for). Does NOT match "A word..." to avoid treating
+       the article "A" as an answer choice.
+    2. Explicit label: "Answer: B", "The answer is C", "Answer is: D"
+    3. Last standalone letter in the text: if the LLM reasoned verbosely before
+       concluding, the answer letter is almost always at the END, not the start.
+       e.g. "A detailed analysis shows the answer is C" -> last = C (correct)
+    4. Fallback: "Z" (counted as wrong in metrics)
+    """
+    cleaned = llm_output.strip().upper()
+
+    # 1. Pure letter answer at start, optionally with punctuation but nothing else after
+    match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\s*$|[.:\)]\s*$|[.:\)]\s+)", cleaned)
+    if match:
+        return match.group(1)
+
+    # 2. Explicit "Answer: B" or "The answer is C" or "Answer is: D"
+    match = re.search(r"(?:ANSWER\s*(?:IS\s*)?[:\-]?\s*|THE\s+ANSWER\s+IS\s+)([A-D])\b", cleaned)
+    if match:
+        return match.group(1)
+
+    # 3. Last standalone A-D in the text (handles verbose reasoning then conclusion)
+    all_matches = re.findall(r"\b([A-D])\b", cleaned)
+    if all_matches:
+        return all_matches[-1]
+
+    return "Z"
+
 
 
 def evaluate_book(raw_book_id, dataset):
@@ -57,12 +93,9 @@ def evaluate_book(raw_book_id, dataset):
         return
 
     qa_pairs = dataset[raw_book_id]["qa_pairs"]
-    print(f"\nEvaluating book {raw_book_id} ({len(qa_pairs)} questions)...")
+    print(f"\n--- Book {raw_book_id} ({len(qa_pairs)} questions) ---")
 
-    pred_file = os.path.join(cache_dir, "predictions.json")
-    if os.path.exists(pred_file):
-        print(f"  Predictions already exist for book {raw_book_id}, skipping.")
-        return
+
 
     if not os.path.exists(cache_dir):
         print(f"  Cache not found: {cache_dir}, skipping.")
@@ -88,45 +121,38 @@ def evaluate_book(raw_book_id, dataset):
         q_graph = qa["question"]
         q_dense = qa["question"]
 
-        # retrieve evidence
-        result = retriever.query(question=q_graph, full_query=q_dense)
+        # Retrieval
+        print(f"  Q{i}/{len(qa_pairs)-1}: Retrieving...")
+        t_start_retrieval = time.time()
+        result = retriever.query(question=q_graph, full_query=q_dense) 
+        retrieval_time = time.time() - t_start_retrieval
         evidence_text = result["chunks"]
+        rtype = result.get('retrieval_type', '?')
+        n_chunks = result.get('len_chunks', 0)
+        print(f"  Q{i}/{len(qa_pairs)-1}: {n_chunks} chunks retrieved via [{rtype}] (qtime={retrieval_time:.2f}s)")
 
-        # Select prompt based on whether we have options
-        # Select prompt
+        # LLM generation
+        print(f"  Q{i}/{len(qa_pairs)-1}: LLM generating answer...")
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         final_prompt = prompt_template.format(question=qa["question"], evidence=evidence_text)
 
         try:
-            llm_output = call_llm(final_prompt, model="qwen", max_tokens=1000)
+            llm_output = call_llm(final_prompt, model=LLM_MODEL_NAME, max_tokens=1000)
         except Exception as e:
-            print(f"  LLM error: {e}")
+            print(f"  Q{i}/{len(qa_pairs)-1}: [ERROR] LLM failed: {e}")
             llm_output = "Z"
 
         if qa["options"]:
-            # extract the predicted letter
-            cleaned = llm_output.strip().upper()
-            final_pred = "Z"
-
-            match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\.|:|\)|$|\s)", cleaned)
-            if match:
-                final_pred = match.group(1)
-            else:
-                match = re.search(r"ANSWER\s*:\s*([A-D])", cleaned)
-                if match:
-                    final_pred = match.group(1)
-                else:
-                    match = re.search(r"\b([A-D])\b", cleaned)
-                    if match:
-                        final_pred = match.group(1)
+            final_pred = extract_answer(llm_output)
         else:
-            # For open QA, just take the raw output
             final_pred = llm_output.strip()
 
-        # ground truth text
+        # Result
         labels = ["A", "B", "C", "D"]
         gt_idx = labels.index(qa["answer"]) if qa["answer"] in labels else -1
         ground_truth_text = qa["options"][gt_idx] if 0 <= gt_idx < len(qa["options"]) else str(qa["answer"])
+        status = "OK" if final_pred == qa["answer"] else "WRONG"
+        print(f"  Q{i}/{len(qa_pairs)-1}: pred={final_pred} gt={qa['answer']} [{status}]")
 
         results.append({
             "question_id": i,
@@ -143,8 +169,8 @@ def evaluate_book(raw_book_id, dataset):
                 "chunk_ids": result.get("chunk_ids", {}),
                 "history": result.get("chunk_counts_history", []),
             },
+            "retrieval_time": retrieval_time,
         })
-        print(f"  Q{i}: pred={final_pred} gt={qa['answer']} mode={result.get('retrieval_type', '?')}")
 
     # save predictions
     out_file = os.path.join(cache_dir, "predictions.json")
@@ -155,7 +181,8 @@ def evaluate_book(raw_book_id, dataset):
     with open(os.path.join(cache_dir, "eval_time.txt"), "w") as f:
         f.write(f"{total_time:.4f}")
 
-    print(f"  Saved to {out_file} ({total_time:.2f}s)")
+    correct = sum(1 for r in results if r["prediction"] == r["ground_truth"])
+    print(f"  Done: {correct}/{len(results)} correct ({total_time:.1f}s)")
 
 
 def main():
@@ -171,9 +198,12 @@ def main():
     else:
         ids = [int(BOOK_ID_TO_EVAL)]
 
-    print(f"Evaluating {len(ids)} books: {list(ids)}")
+    # Pre-load all models before any progress bars
+    print("\nPre-loading models...")
+    preload_models(llm_model=LLM_MODEL_NAME)
+    print()
 
-    for book_idx in ids:
+    for idx, book_idx in enumerate(ids):
         evaluate_book(str(book_idx), dataset)
         unload_model()
 

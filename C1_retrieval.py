@@ -6,7 +6,7 @@ Supports global (dense), local (graph), and hybrid retrieval strategies.
 import json
 import re
 import copy
-import logging
+
 import numpy as np
 import faiss
 import spacy
@@ -14,15 +14,13 @@ from typing import List, Dict, Tuple, Optional, Any
 from collections import defaultdict
 from itertools import combinations
 
-logger = logging.getLogger(__name__)
-
 # Constants for entity extraction
 NER_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP", "EVENT"}
 PRONOUN_LIKE = {"he", "she", "it", "they", "we", "i", "you", "this", "that"}
 
 
 class Retriever:
-    """E²GraphRAG-style retriever with Neo4j graph and FAISS dense retrieval."""
+    """E2GraphRAG-style retriever with Neo4j graph and FAISS dense retrieval."""
     
     def __init__(self, tree: Dict, neo4j_driver, book_id: str,
                  I_e2c: Dict, I_c2e: Dict, I_s2e: Dict, I_e2s: Dict,
@@ -48,8 +46,6 @@ class Retriever:
         # Config
         self.max_chunk_setting = kwargs.get("max_chunk_setting", 25)
         self.shortest_path_k = kwargs.get("shortest_path_k", 4)
-        
-        logger.info(f"Retriever initialized: {len(tree)} nodes, {len(I_e2c)} entities")
 
     def extract_query_entities(self, query: str) -> List[str]:
         """Extract and canonicalize entities from query using SpaCy NER."""
@@ -96,7 +92,6 @@ class Retriever:
                 record = result.single()
                 return record["path_length"] if record else None
         except Exception as e:
-            logger.debug(f"No path {e1}-{e2}: {e}")
             return None
 
     def index_mapping(self, entities: list) -> Dict[str, List[str]]:
@@ -158,7 +153,9 @@ class Retriever:
     
     def dense_retrieval(self, query: str, k: int) -> Dict[str, List[str]]:
         """FAISS dense retrieval over all tree nodes."""
+        # print(f"dense_retrieval: embedding query '{query[:50]}...'")
         query_embed = np.array(self.embedder_func(query)).reshape(1, -1).astype('float32')
+        # print("dense_retrieval: searching FAISS index...")
         _, indices = self.faiss_index.search(query_embed, k=k)
         
         candidates = [self.node_id_list[i] for i in indices[0] 
@@ -255,7 +252,7 @@ class Retriever:
                 elif f"L0_{node_id}" in self.tree:
                     text = self.tree[f"L0_{node_id}"]["text"]
                 else:
-                    logger.warning(f"Node {node_id} not found in tree")
+                    print(f"Warning: Node {node_id} not found in tree")
                     continue
                 
                 parts.append(f"{key}: {text}" if key else text)
@@ -263,7 +260,7 @@ class Retriever:
 
     def query(self, question: str, full_query: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
-        Main retrieval implementing E²GraphRAG adaptive strategy.
+        Main retrieval implementing E2GraphRAG adaptive strategy.
         
         Args:
             question: The question text (used for Entity Extraction).
@@ -277,25 +274,25 @@ class Retriever:
         dense_input = full_query if full_query else question
         
         # Step 1: Extract entities from Question Only
-        # (We no longer need strict newline splitting if the caller separates them)
         entities = self.extract_query_entities(question)
-        logger.info(f"Entities: {entities}")
+
         
         # Step 2: No entities -> Global dense retrieval (Using Dense Input)
         if not entities:
-            logger.info("No entities -> Global Search")
+            print("No entities -> Global Search")
             res = self.dense_retrieval(dense_input, max_chunks)
             return self._build_result(res, entities, "Global Search", [])
         
         # Step 3: Local retrieval (Graph-based, using Entities)
+        print("Starting local retrieval...")
         local_res = self.local_retrieval(entities, k)
         count = self._count_chunks(local_res)
         history = [(k, count)]
-        logger.info(f"Local: k={k}, count={count}")
+        print(f"Local: k={k}, count={count}")
         
         # Step 4: Zero results to Occurrence rerank
         if count == 0:
-            logger.info("Local=0 to Occurrence Rerank")
+            print("Local=0 to Occurrence Rerank")
             # Dense retrieval gets 2x candidates to filtered by Entities
             dense = self.dense_retrieval(dense_input, max_chunks * 2)
             res = self.occurrence_ranking(dense.get("", []), entities, max_chunks)
@@ -303,22 +300,17 @@ class Retriever:
         
         # Step 5: Too many to Iterative tightening
         prev_res = None
-        while count > max_chunks and k > 1:
+        while count > max_chunks:
             prev_res = copy.deepcopy(local_res)
             k -= 1
-            # Strict mode: If k=1 yields no pairs, do NOT explode to all entities.
             new_res = self.local_retrieval(entities, k, allow_fallback=False)
             
             new_count = self._count_chunks(new_res)
-            
-            if new_count == 0:
-                logger.info(f"Tighten: k={k} yielded 0. Reverting to k={k+1}")
-                break
                 
             local_res = new_res
             count = new_count
             history.append((k, count))
-            logger.info(f"Tighten: k={k}, count={count}")
+            print(f"Tighten: k={k}, count={count}")
         
         # Step 6: Return result
         if count > 0:
@@ -326,7 +318,7 @@ class Retriever:
             return self._build_result(local_res, entities, rtype, history)
         
         # Tightening hit 0 to EntityAware filter
-        logger.info("Tightening hit 0 -> EntityAware Filter")
+        print("Tightening hit 0 -> EntityAware Filter")
         if prev_res:
             res = self.entityaware_filter(prev_res, entities, max_chunks)
             rtype = f"EntityAware Filter, Loop for {len(history)-1} times"
@@ -387,7 +379,7 @@ def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
     
     nlp = spacy.load(spacy_model)
     
-    logger.info(f"Loaded: {len(tree)} nodes, {len(I_e2c)} entities, {faiss_index.ntotal} vectors")
+
     
     return Retriever(
         tree=tree, neo4j_driver=driver, book_id=book_id,

@@ -25,12 +25,15 @@ DATASET_NAME = "InfiniteChoice"
 DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl")
 
 RUN_MODE = "range"           # "single", "range", or "all"
-BOOK_IDS = range(0, 5)       # used in range mode
+BOOK_IDS = range(0, 20)       # used in range mode
 TARGET_BOOK_ID = 0           # used in single mode
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
+
+# Options: "qwen", "gpt", "lmstudio"
+LLM_MODEL_NAME = "qwen"
 
 
 def get_batch_embeddings(texts):
@@ -39,23 +42,35 @@ def get_batch_embeddings(texts):
 
 
 def extract_answer(llm_output):
-    """Pull out A/B/C/D from whatever the LLM returned."""
+    """
+    Extract A/B/C/D from LLM output.
+
+    Priority order:
+    1. Clean single-letter answer at start: "A", "A.", "A:" with nothing after
+       (what the prompt asks for). Does NOT match "A word..." to avoid treating
+       the article "A" as an answer choice.
+    2. Explicit label: "Answer: B", "The answer is C", "Answer is: D"
+    3. Last standalone letter in the text: if the LLM reasoned verbosely before
+       concluding, the answer letter is almost always at the END, not the start.
+       e.g. "A detailed analysis shows the answer is C" -> last = C (correct)
+    4. Fallback: "Z" (counted as wrong in metrics)
+    """
     cleaned = llm_output.strip().upper()
 
-    # try "A", "A.", "A:" at the start
-    match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\.|:|\)|$|\s)", cleaned)
+    # 1. Pure letter answer at start, optionally with punctuation but nothing else after
+    match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\s*$|[.:\)]\s*$|[.:\)]\s+)", cleaned)
     if match:
         return match.group(1)
 
-    # try "Answer: A"
-    match = re.search(r"ANSWER\s*:\s*([A-D])", cleaned)
+    # 2. Explicit "Answer: B" or "The answer is C" or "Answer is: D"
+    match = re.search(r"(?:ANSWER\s*(?:IS\s*)?[:\-]?\s*|THE\s+ANSWER\s+IS\s+)([A-D])\b", cleaned)
     if match:
         return match.group(1)
 
-    # any standalone A-D
-    match = re.search(r"\b([A-D])\b", cleaned)
-    if match:
-        return match.group(1)
+    # 3. Last standalone A-D in the text (handles verbose reasoning then conclusion)
+    all_matches = re.findall(r"\b([A-D])\b", cleaned)
+    if all_matches:
+        return all_matches[-1]
 
     return "Z"
 
@@ -100,26 +115,37 @@ def evaluate_book(book_idx, dataset):
         print(f"  Q{i+1}/{len(qa_list)}...", end=" ", flush=True)
 
         # retrieve context
+        t_retrieval = time.time()
         try:
             retrieval_res = retrieve(
                 question=qa["question"],
                 options=qa["options"],
                 resources=resources,
-                verbose=False,
             )
             context = retrieval_res.get("context", "")
         except Exception:
             traceback.print_exc()
             context = ""
             retrieval_res = {}
+        retrieval_time = time.time() - t_retrieval
+
+        # print retrieval stage counts
+        s = retrieval_res.get("stats", {})
+        print(f"  [Stats] region={s.get('region_chunks','?')} chunks | "
+              f"graph_edges={s.get('relations_found','?')} | "
+              f"after_collection={s.get('candidates_before_mmr','?')} | "
+              f"after_MMR={s.get('candidates_after_mmr','?')} | "
+              f"after_CrossEncoder={s.get('final_chunks','?')} | "
+              f"mode={retrieval_res.get('retrieval_mode','?')} | "
+              f"time={retrieval_time:.2f}s")
 
         # build prompt and generate answer
         # Select prompt
         full_q = qa["question"]
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
-
         prompt = prompt_template.format(question=full_q, evidence=context)
-        llm_response = call_llm(prompt, model="qwen", max_tokens=1000)
+        
+        llm_response = call_llm(prompt, model=LLM_MODEL_NAME, max_tokens=1000)
 
         if qa["options"]:
             prediction = extract_answer(llm_response)
@@ -138,6 +164,7 @@ def evaluate_book(book_idx, dataset):
             "prediction": prediction,
             "raw_response": llm_response,
             "evidence": context,
+            "retrieval_time": retrieval_time,
             "retrieval_stats": retrieval_res.get("stats", {}),
         })
         print(f"pred={prediction} gt={qa['answer']}")
@@ -147,7 +174,11 @@ def evaluate_book(book_idx, dataset):
         json.dump(results, f, indent=2)
 
     elapsed = time.time() - start_time
-    print(f"Book {book_idx} done in {elapsed:.2f}s. Saved to {output_file}")
+    with open(os.path.join(cache_dir, "eval_time.txt"), "w") as f:
+        f.write(f"{elapsed:.4f}")
+
+    correct = sum(1 for r in results if r["prediction"] == r["ground_truth"])
+    print(f"Book {book_idx} done: {correct}/{len(results)} correct ({elapsed:.1f}s). Saved to {output_file}")
 
 
 def main():

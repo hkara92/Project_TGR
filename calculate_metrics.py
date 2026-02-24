@@ -1,100 +1,164 @@
 import os
 import json
-import logging
-from typing import Tuple
 from rouge import Rouge
+from sklearn.metrics import confusion_matrix, classification_report, f1_score
 
-# --- CONFIGURATION ---
-# Options: "InfiniteChoice" (Multiple Choice), "InfiniteQA" (Free Generation)
-DATASET_NAME = "InfiniteChoice" 
-CACHE_ROOT = "./cache"
+DATASET_NAME = "InfiniteChoice"   # or "InfiniteQA"
+CACHE_ROOT   = "./cache"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+CHOICE_LABELS = ["A", "B", "C", "D"]
 
-def standardize_answer(text):
+
+def clean(text):
     return str(text).strip().upper()
 
-def EM_score(pred, truth):
-    return 1.0 if standardize_answer(pred) == standardize_answer(truth) else 0.0
 
-def RL_score(pred, gold):
-    """Calculate Rouge-L score using rouge library"""
-    pred = standardize_answer(pred)
-    gold = standardize_answer(gold)
-    if not pred or not gold: return 0.0
-    
-    rouge = Rouge()
+def em_score(pred, truth):
+    return 1.0 if clean(pred) == clean(truth) else 0.0
+
+
+def rouge_l(pred, gold):
+    pred, gold = clean(pred), clean(gold)
+    if not pred or not gold:
+        return 0.0
     try:
-        scores = rouge.get_scores(pred, gold)[0]
-        return round(scores['rouge-l']['f'], 4)
+        return round(Rouge().get_scores(pred, gold)[0]["rouge-l"]["f"], 4)
     except:
         return 0.0
 
-def calculate_metrics(answer_folder: str, dataset_name: str) -> Tuple[float, float, int]:
-    """
-    Calculate metrics based on dataset type.
-    """
-    base_path = os.path.join(answer_folder, dataset_name)
-    logger.info(f"Scanning for predictions in: {base_path}")
-    
-    total_em_score = 0
-    total_rl_score = 0
-    total_num = 0
-    
-    if not os.path.exists(base_path):
-        logger.error(f"Folder not found: {base_path}")
-        return 0.0, 0.0, 0
 
-    for root, _, files in os.walk(base_path):
-        for file in files:
-            if file in ["predictions.json", "predictions_C2.json"]:
-                full_path = os.path.join(root, file)
+def load_predictions(cache_root, dataset_name):
+    """Walk cache folder and return all prediction records as a flat list."""
+    records = []
+    base = os.path.join(cache_root, dataset_name)
+    for root, _, files in os.walk(base):
+        for fname in files:
+            if fname in ("predictions.json", "predictions_C2.json"):
                 try:
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        answer_list = json.load(f)
-                        if len(answer_list) > 0:
-                            book_id = os.path.basename(root)
-                            print(f"[Metrics] Processing Book ID: {book_id} ({len(answer_list)} qs)")
-                            
+                    records.extend(json.load(open(os.path.join(root, fname), encoding="utf-8")))
                 except Exception as e:
-                    logger.error(f"Error reading {full_path}: {e}")
-                    continue
-                
-                for qa in answer_list:
-                    pred = qa.get("prediction", "Z")
-                    truth = qa.get("ground_truth", "")
-                    
-                    if dataset_name == "InfiniteChoice":
-                        # Multiple Choice
-                        em = EM_score(pred, truth)
-                        total_em_score += em
-                        total_rl_score += em 
-                    elif dataset_name in ["InfiniteQA", "InfiniteQALoader", "NarrativeQA"]:
-                        # Free Text
-                        rl = RL_score(pred, truth)
-                        total_rl_score += rl
-                        total_em_score += EM_score(pred, truth)
-                    else:
-                        total_em_score += EM_score(pred, truth)
-                        total_rl_score += RL_score(pred, truth)
-                    
-                    total_num += 1
+                    print(f"Could not read {os.path.join(root, fname)}: {e}")
+    return records
 
-    if total_num == 0:
-        return 0.0, 0.0, 0
-        
-    return total_em_score / total_num, total_rl_score / total_num, total_num
+
+def calculate_accuracy(records):
+    if not records:
+        return 0.0, 0
+    correct = sum(em_score(r.get("prediction", "Z"), r.get("ground_truth", "")) for r in records)
+    return correct / len(records), len(records)
+
+
+def calculate_rouge(records):
+    if not records:
+        return 0.0, 0
+    total = sum(rouge_l(r.get("prediction", ""), r.get("ground_truth", "")) for r in records)
+    return total / len(records), len(records)
+
+
+def calculate_classification_metrics(records):
+    """Confusion matrix, per-class P/R/F1, and macro F1 for multiple-choice."""
+    y_true, y_pred, skipped = [], [], 0
+    for r in records:
+        gt = clean(r.get("ground_truth", ""))
+        pr = clean(r.get("prediction", "Z"))
+        if gt in CHOICE_LABELS and pr in CHOICE_LABELS:
+            y_true.append(gt)
+            y_pred.append(pr)
+        else:
+            skipped += 1
+
+    if not y_true:
+        return None
+
+    return {
+        "count":            len(y_true),
+        "skipped":          skipped,
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=CHOICE_LABELS),
+        "macro_f1":         f1_score(y_true, y_pred, labels=CHOICE_LABELS, average="macro"),
+        "report":           classification_report(y_true, y_pred, labels=CHOICE_LABELS, digits=4),
+    }
+
+
+def calculate_timing(cache_root, dataset_name):
+    """Collect tree build times, eval times, and per-question retrieval times."""
+    base = os.path.join(cache_root, dataset_name)
+    tree_times, eval_times, retrieval_times = [], [], []
+
+    if not os.path.exists(base):
+        return tree_times, eval_times, retrieval_times
+
+    for book_dir in sorted(os.listdir(base)):
+        bp = os.path.join(base, book_dir)
+        if not os.path.isdir(bp):
+            continue
+
+        for fname, lst in [("indexing_time_tree.txt", tree_times), ("eval_time.txt", eval_times)]:
+            fp = os.path.join(bp, fname)
+            if os.path.exists(fp):
+                try:
+                    lst.append(float(open(fp).read().strip()))
+                except:
+                    pass
+
+        for pf in ("predictions.json", "predictions_C2.json"):
+            pp = os.path.join(bp, pf)
+            if os.path.exists(pp):
+                try:
+                    for qa in json.load(open(pp, encoding="utf-8")):
+                        t = qa.get("retrieval_time")
+                        if t is not None:
+                            retrieval_times.append(float(t))
+                except:
+                    pass
+
+    return tree_times, eval_times, retrieval_times
+
 
 if __name__ == "__main__":
-    em, rl, count = calculate_metrics(CACHE_ROOT, DATASET_NAME)
+    records = load_predictions(CACHE_ROOT, DATASET_NAME)
+    sep = "=" * 45
 
-    print("\n" + "="*40)
-    print(f"EVALUATION RESULTS ({DATASET_NAME})")
-    print("="*40)
-    print(f"Total Questions: {count}")
-    
+    print(f"\n{sep}")
+    print(f"  RESULTS  -  {DATASET_NAME}  ({len(records)} questions)")
+    print(sep)
+
     if DATASET_NAME == "InfiniteChoice":
-        print(f"Accuracy (EM):  {em*100:.2f}%")
-    elif DATASET_NAME in ["InfiniteQA"]:
-         print(f"Rouge-L (F1):   {rl:.4f}")
+        acc, n = calculate_accuracy(records)
+        print(f"  Accuracy (EM)  : {acc * 100:.2f}%")
+
+        cls = calculate_classification_metrics(records)
+        if cls:
+            print(f"  Macro F1       : {cls['macro_f1'] * 100:.2f}%")
+            if cls["skipped"]:
+                print(f"  Skipped rows   : {cls['skipped']}  (prediction not in A/B/C/D)")
+
+            print(f"\n{sep}")
+            print("  CONFUSION MATRIX  (rows=ground truth, cols=predicted)")
+            print(sep)
+            cm = cls["confusion_matrix"]
+            print("  GT / Pred   " + "     ".join(CHOICE_LABELS))
+            for i, row in enumerate(cm):
+                print(f"  {CHOICE_LABELS[i]}           " + "     ".join(f"{v:>4d}" for v in row))
+
+            print(f"\n{sep}")
+            print("  PER-CLASS METRICS")
+            print(sep)
+            print(cls["report"])
+
+    elif DATASET_NAME == "InfiniteQA":
+        rl, n = calculate_rouge(records)
+        print(f"  Rouge-L (F1)   : {rl:.4f}")
+
+    # Timing
+    tree_times, eval_times, retrieval_times = calculate_timing(CACHE_ROOT, DATASET_NAME)
+    print(f"{sep}")
+    print("  TIMING")
+    print(sep)
+    for label, vals in [("Tree build  (s/book)    ", tree_times),
+                         ("Eval time   (s/book)    ", eval_times),
+                         ("Retrieval   (s/question)", retrieval_times)]:
+        if vals:
+            print(f"  {label}: avg={sum(vals)/len(vals):.2f}   n={len(vals)}")
+    if not any([tree_times, eval_times, retrieval_times]):
+        print("  No timing data found.")
+    print(sep)

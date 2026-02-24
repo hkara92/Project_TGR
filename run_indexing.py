@@ -40,6 +40,7 @@ EMBEDDER_MODEL = "bge" if LLM_CHOICE == "qwen" else "text-embedding-3-large"
 DATASET_NAME = "InfiniteQA"
 DATASET_PATH = "./data/InfiniteBench/longbook_qa_eng.jsonl"
 CACHE_DIR = "./cache"
+
 CHUNK_SIZE = 1200
 OVERLAP = 100
 CHUNKING_METHOD = "tokens"
@@ -133,17 +134,25 @@ for i, book_id in enumerate(book_ids):
         print(f"  Found {len(I_e2c)} entities in {time.time()-start_ent:.2f}s")
 
     # build FAISS and inverted indexes
-    print("Building search indexes...")
-    try:
-        extract_all_indexes(book_cache_dir)
-    except Exception as e:
-        print(f"  Index build failed: {e}")
+    faiss_file = os.path.join(book_cache_dir, "summary_tree", "tree.index")
+    if os.path.exists(faiss_file):
+        print("  FAISS index already exists, skipping.")
+    else:
+        print("Building search indexes...")
+        try:
+            extract_all_indexes(book_cache_dir)
+        except Exception as e:
+            print(f"  Index build failed: {e}")
 
     # extract relations using the LLM
-    print("Extracting relations...")
-    start_rel = time.time()
-    extract_and_merge_relations(chunks, I_c2e, llm_choice=LLM_CHOICE, cache_dir=book_cache_dir)
-    print(f"  Relations done ({time.time()-start_rel:.2f}s).")
+    edges_file = os.path.join(book_cache_dir, "edges.json")
+    if os.path.exists(edges_file):
+        print("  Relations already extracted, skipping.")
+    else:
+        print("Extracting relations...")
+        start_rel = time.time()
+        extract_and_merge_relations(chunks, I_c2e, llm_choice=LLM_CHOICE, cache_dir=book_cache_dir)
+        print(f"  Relations done ({time.time()-start_rel:.2f}s).")
 
     print(f"Book {book_id} complete!")
 

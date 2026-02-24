@@ -1,7 +1,7 @@
 """
 llm.py
 
-Handles LLM calls (GPT-5 or Qwen 2.5 14B) and embedding generation
+Handles LLM calls (GPT-5 or Qwen3-14B) and embedding generation
 (OpenAI or BAAI BGE). Models are cached after first load and freed
 with unload_model().
 """
@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-QWEN_MODEL_NAME = "./models/Qwen2.5-14B-Instruct"
+QWEN_MODEL_NAME = "./models/Qwen3-14B"
 BGE_MODEL_NAME = "BAAI/bge-large-en-v1.5"
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
@@ -102,6 +102,7 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
             _qwen_tokenizer = AutoTokenizer.from_pretrained(
                 QWEN_MODEL_NAME, trust_remote_code=True, cache_dir=MODELS_DIR
             )
+            
             _qwen_model = AutoModelForCausalLM.from_pretrained(
                 QWEN_MODEL_NAME,
                 torch_dtype=torch.bfloat16,
@@ -109,21 +110,53 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
                 trust_remote_code=True,
                 cache_dir=MODELS_DIR,
             )
-            print("[LLM] Model loaded.")
+            print("[LLM] Qwen3-14B loaded (bfloat16).")
         
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt},
         ]
         formatted = _qwen_tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
         )
         
         inputs = _qwen_tokenizer([formatted], return_tensors="pt").to(_qwen_model.device)
-        output_ids = _qwen_model.generate(**inputs, max_new_tokens=max_tokens)
+        output_ids = _qwen_model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=True,
+            temperature=0.5,
+            top_p=0.8,
+            top_k=20,
+        )
         new_tokens = output_ids[0][inputs.input_ids.shape[1]:]
         response = _qwen_tokenizer.decode(new_tokens, skip_special_tokens=True)
         return response.strip()
+
+    if model == "lmstudio":
+        # LM Studio exposes an OpenAI-compatible API at localhost:1234
+        from openai import OpenAI
+        
+        # Point to local server
+        client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
+        
+        try:
+            resp = client.chat.completions.create(
+                model="local-model",  # The specific name doesn't matter for LM Studio
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1, # Low temp for factual QA
+                max_tokens=max_tokens,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            print(f"[LLM] LM Studio Error: {e}")
+            return "Error generating response"
     
     raise ValueError(f"Unknown model: {model}")
 
@@ -163,3 +196,10 @@ def get_embeddings(texts, model="text-embedding-3-large"):
 def get_embedding_dim(model="text-embedding-3-large"):
     """Return the vector size for the chosen embedding model."""
     return 1024 if model == "bge" else 3072
+
+
+def preload_models(llm_model="qwen"):
+    """Pre-load BGE embedder and optionally the Qwen LLM."""
+    get_embeddings(["warmup"], model="bge")
+    if llm_model == "qwen":
+        call_llm("warmup", model="qwen", max_tokens=1)

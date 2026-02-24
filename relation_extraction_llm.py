@@ -47,7 +47,7 @@ Do NOT extract:
 - Relations not supported by this specific text
 
 ---Output Format---
-Return a JSON array. If no relationships exist, return [].
+Return ONLY a JSON array. No explanation, no commentary, no markdown.
 
 [
   {{
@@ -89,7 +89,7 @@ ENTITIES:
 TEXT:
 {chunk_text}
 
-OUTPUT:
+Return ONLY the JSON array:
 """
 
 
@@ -145,7 +145,7 @@ def extract_relations_from_chunk(chunk_text, entities, model="gpt", verbose=True
     prompt = PROMPT.format(entity_list=entity_list, chunk_text=chunk_text[:8000])
 
     try:
-        response = call_llm(prompt, model=model, max_tokens=8192)
+        response = call_llm(prompt, model=model, max_tokens=2048)
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
         return None

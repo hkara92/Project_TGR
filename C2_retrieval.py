@@ -1,16 +1,9 @@
 """
 C2_retrieval.py
 
-Region-restricted retrieval pipeline:
-  1. Extract query entities (SpaCy)
-  2. FAISS + cross-encoder -> top summary nodes (region selection)
-  3. define_region -> C_region (chunks) + E_region (entities)
-  4. Fuzzy seed selection
-  5. Graph traversal (1-hop or 2-hop) within region
-  6. Collect candidate chunks (edge evidence + entity mentions)
-  7. MMR -> diverse subset
-  8. Cross-encoder rerank -> top 15
-  9. Lost-in-the-Middle reorder -> LLM
+The advanced region-restricted retrieval pipeline for our Knowledge Graph.
+It strictly limits graph traversals to specific regions of the book to 
+prevent hallucinations and improve accuracy.
 """
 
 import os
@@ -20,41 +13,43 @@ import logging
 import numpy as np
 import faiss
 import spacy
-
 from rapidfuzz import fuzz as _fuzz
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
-    "tree_top_m": 10,               # summary nodes kept after cross-encoder
+    "tree_top_m": 10,               
     "use_tree_rerank": True,
-    "max_hops": 2,                  # 1 or 2
     "max_candidates": 50,
     "max_chunks_per_entity": 10,
     "use_entity_mention_chunks": True,
     "mmr_top_k": 20,
     "mmr_lambda": 0.5,
-    "final_top_k": 15,              # chunks given to LLM
+    "final_top_k": 15,              
     "min_candidates": 3,
     "fuzzy_threshold": 85,
     "fuzzy_min_length": 5,
+
+    # Shortest-path specific target limits
+    "key_top_k": 50,                
+    "entity_topn_chunks": 10,       
+    "shortest_max_hops": 4,         
 }
 
 NER_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP", "EVENT"}
 NER_SKIP   = {"he", "she", "it", "they", "we", "i", "you", "this", "that"}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def strip_options(text):
-    """Return question text only, dropping appended A./B./C./D. options."""
+    """Removes the appended A/B/C/D options so we only search using the question text."""
     return text.split("\nA. ")[0].strip() if "\nA. " in text else text.strip()
 
 
 def extract_entities(text, nlp):
-    """SpaCy NER on question text (options stripped first)."""
+    """Extracts and cleans up named entities using SpaCy."""
     doc = nlp(strip_options(text))
     seen, entities = set(), []
     for ent in doc.ents:
@@ -69,7 +64,7 @@ def extract_entities(text, nlp):
 
 
 def fuzzy_match(query_entities, E_region, threshold=85, min_len=5):
-    """Match query entities to E_region using fuzzy string similarity."""
+    """Matches query entities against the allowed region using fuzzy string similarity."""
     matched = set()
     for qe in query_entities:
         if len(qe) < min_len:
@@ -89,43 +84,29 @@ def fuzzy_match(query_entities, E_region, threshold=85, min_len=5):
 # ---------------------------------------------------------------------------
 
 def mmr_select(query, candidates, embedder_func, top_k, lambda_param=0.5, chunk_embs=None):
-    """
-    Select a diverse + relevant subset using MMR.
-
-    relevance(c) = cosine(query_embedding, chunk_embedding)
-    MMR score    = lambda * relevance(c) - (1-lambda) * max_sim(c, already_selected)
-
-    chunk_embs: optional dict {chunk_id -> np.array} of precomputed embeddings.
-                If provided, skips re-embedding candidate texts (much faster).
-    """
+    """Selects a diverse set of chunks using MMR so we don't return redundant information."""
     if len(candidates) <= top_k:
         return candidates
 
-    # Embed query (always needed at query time, cheap single call)
     q_emb = np.array(embedder_func([query])[0]).astype("float32")
     q_emb = q_emb / max(np.linalg.norm(q_emb), 1e-9)
 
-    # Get candidate embeddings: use precomputed if available, else embed now
     if chunk_embs is not None:
         emb_list = []
         for c in candidates:
-            node_id = f"L0_{c['chunk_id']}" if not c["chunk_id"].startswith("L0_") else c["chunk_id"]
-            emb = chunk_embs.get(node_id)
+            cid = c["chunk_id"]
+            emb = chunk_embs.get(cid)
             if emb is None:
-                emb = chunk_embs.get(c["chunk_id"])
-            if emb is None:
-                # Fallback: embed on the fly if missing from precomputed
                 emb = np.array(embedder_func([c["text"]])[0]).astype("float32")
             emb_list.append(emb)
         embs = np.array(emb_list).astype("float32")
     else:
         embs = np.array(embedder_func([c["text"] for c in candidates])).astype("float32")
 
-    # Normalize
     norms = np.linalg.norm(embs, axis=1, keepdims=True)
     embs  = embs / np.where(norms == 0, 1e-9, norms)
 
-    relevance = embs @ q_emb   # cosine similarity (n,)
+    relevance = embs @ q_emb
 
     n = len(candidates)
     selected, remaining = [], list(range(n))
@@ -154,7 +135,7 @@ def mmr_select(query, candidates, embedder_func, top_k, lambda_param=0.5, chunk_
 # ---------------------------------------------------------------------------
 
 def lost_in_middle_reorder(chunks):
-    """Place most-relevant chunks at start and end; least-relevant in middle."""
+    """Reorders chunks so the most relevant ones are at the very beginning and very end, preventing the LLM from losing track of them."""
     if len(chunks) <= 2:
         return chunks
     result, l, r = [None] * len(chunks), 0, len(chunks) - 1
@@ -173,12 +154,11 @@ def lost_in_middle_reorder(chunks):
 
 def tree_pruning(dense_query, question_only, faiss_index, node_id_list,
                  embedder_func, tree_nodes, cross_encoder, config):
-    """FAISS finds summary node candidates; cross-encoder reranks them."""
-    qv = np.array(embedder_func(dense_query)).reshape(1, -1).astype("float32")
+    """Uses FAISS and a cross-encoder to find the most relevant high-level summary nodes."""
+    qv = np.array(embedder_func([dense_query])[0]).reshape(1, -1).astype("float32")
     faiss.normalize_L2(qv)
     _, indices = faiss_index.search(qv, config["tree_top_m"] * 10)
 
-    # Filter out raw chunk nodes (L0), keep only summary nodes
     candidates = [
         node_id_list[i]
         for i in indices[0]
@@ -206,11 +186,10 @@ def tree_pruning(dense_query, question_only, faiss_index, node_id_list,
 # ---------------------------------------------------------------------------
 
 def define_region(summary_ids, tree_nodes, I_s2e):
-    """Expand summary nodes into C_region (chunks) and E_region (entities)."""
+    """Expands the chosen summary nodes down into their exact leaf chunks and valid entities."""
     C_region, E_region = set(), set()
     for sid in summary_ids:
         for leaf in tree_nodes.get(sid, {}).get("leaves", []):
-            # Normalize to "L0_chunk_X" format regardless of what leaves stored
             C_region.add(leaf if leaf.startswith("L0_") else f"L0_{leaf}")
         E_region.update(I_s2e.get(sid, []))
     print(f"[Region] C_region={len(C_region)} chunks, E_region={len(E_region)} entities")
@@ -222,7 +201,7 @@ def define_region(summary_ids, tree_nodes, I_s2e):
 # ---------------------------------------------------------------------------
 
 def select_seeds(query_entities, E_region, config):
-    """Fuzzy-match query entities to E_region. No frequency fallback."""
+    """Finds exact starting points in the graph by matching query entities to the allowed region."""
     if not query_entities:
         print("[Seeds] No query entities.")
         return [], "no_query_entities"
@@ -237,65 +216,103 @@ def select_seeds(query_entities, E_region, config):
 
 
 # ---------------------------------------------------------------------------
-# Graph traversal
+# Key entity ranking
 # ---------------------------------------------------------------------------
 
-def traverse_graph(seeds, E_region, C_region, book_id, driver, max_hops=1):
-    """Traverse Neo4j from seeds, constrained to E_region and C_region."""
-    if max_hops == 1:
-        cypher = """
-        MATCH (s:Entity)-[r:RELATION]-(n:Entity)
-        WHERE s.book_id = $book_id AND s.name IN $seeds AND n.name IN $e_region
-        WITH s.name AS source, n.name AS target, r.relation AS relation,
-             r.weight AS weight,
-             [c IN r.chunk_ids WHERE c IN $c_region] AS evidence
-        WHERE SIZE(evidence) > 0
-        RETURN source, target, relation, weight, evidence
-        """
-    else:
-        # 2-hop: seed -> middle -> target
-        # book_id is checked on ALL three nodes and both relationships
-        # to prevent cross-book contamination (entity names are not unique across books).
-        cypher = """
-        MATCH (s:Entity {book_id: $book_id})-[r1:RELATION {book_id: $book_id}]-
-              (m:Entity {book_id: $book_id})-[r2:RELATION {book_id: $book_id}]-
-              (n:Entity {book_id: $book_id})
-        WHERE s.name IN $seeds
-          AND m.name IN $e_region
-          AND n.name IN $e_region
-          AND m <> s AND n <> s AND n <> m
-        WITH s.name AS src, m.name AS mid, n.name AS tgt,
-             r1.relation AS rel1, r2.relation AS rel2,
-             r1.weight AS w1, r2.weight AS w2,
-             [c IN r1.chunk_ids WHERE c IN $c_region] AS ev1,
-             [c IN r2.chunk_ids WHERE c IN $c_region] AS ev2
-        WHERE SIZE(ev1) > 0 OR SIZE(ev2) > 0
-        RETURN src, mid, tgt, rel1, rel2, w1, w2, ev1, ev2
-        """
+def rank_key_entities(question_only, E_region, I_e2c, chunk_embs, embedder_func,
+                      top_k=50, topn_chunks=10, exclude=set()):
+    """Ranks the best target entities to path towards, based on how closely their chunks match the question."""
+    if not E_region:
+        return []
 
-    params = dict(book_id=book_id, seeds=list(seeds),
-                  e_region=list(E_region), c_region=list(C_region))
+    if chunk_embs is None:
+        chunk_embs = {}
+
+    q_emb = np.array(embedder_func([question_only])[0]).astype("float32")
+    q_emb = q_emb / max(np.linalg.norm(q_emb), 1e-9)
+
+    scored = []
+    for entity in E_region:
+        if entity in exclude:
+            continue
+
+        chunk_ids = I_e2c.get(entity, [])
+        if not chunk_ids:
+            continue
+
+        sims = []
+        for cid in chunk_ids:
+            emb = chunk_embs.get(cid)
+            if emb is None:
+                continue
+            emb = emb / max(np.linalg.norm(emb), 1e-9)
+            sims.append(float(emb @ q_emb))
+
+        if not sims:
+            continue
+
+        sims.sort(reverse=True)
+        top = sims[:topn_chunks]
+        score = sum(top) / len(top)
+        scored.append((entity, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_entities = [e for e, _ in scored[:top_k]]
+    print(f"[KeyTargets] Selected {len(top_entities)} key targets (top_k={top_k}).")
+    return top_entities
+
+
+# ---------------------------------------------------------------------------
+# Shortest path (batched UNWIND)
+# ---------------------------------------------------------------------------
+
+def shortest_path_batch(seeds, key_targets, C_region, book_id, driver, max_hops=4):
+    """Runs a batched Cypher query to find the shortest graph paths between our seeds and targets, staying strictly within the allowed chunk region."""
+    pairs = [{"seed": s, "target": t} for s in seeds for t in key_targets if s != t]
+    if not pairs:
+        return [], set(seeds)
+
+    max_hops = int(max_hops)
+    if max_hops < 1:
+        max_hops = 1
+
+    # Neo4j query parameters must be explicitly formatted
+    cypher = f"""
+    UNWIND $pairs AS p
+    MATCH (a:Entity {{book_id:$book_id, name:p.seed}})
+    MATCH (b:Entity {{book_id:$book_id, name:p.target}})
+    MATCH path = shortestPath((a)-[:RELATION*..{max_hops}]-(b))
+    WHERE ALL(r IN relationships(path) WHERE r.book_id = $book_id)
+    WITH p, relationships(path) AS rels
+    UNWIND rels AS r
+    WITH p.seed AS seed, p.target AS target,
+         r.relation AS relation,
+         [c IN r.chunk_ids WHERE c IN $c_region] AS evidence
+    WHERE SIZE(evidence) > 0
+    RETURN seed, target, relation, evidence
+    """
+
+    params = {
+        "pairs": pairs,
+        "book_id": book_id,
+        "c_region": list(C_region),
+    }
 
     with driver.session() as session:
         rows = list(session.run(cypher, **params))
 
-    visited, records = set(seeds), []
-    if max_hops == 1:
-        for r in rows:
-            visited.update([r["source"], r["target"]])
-            records.append({"source": r["source"], "target": r["target"],
-                            "relation": r["relation"], "evidence": r["evidence"]})
-    else:
-        for r in rows:
-            visited.update([r["src"], r["mid"], r["tgt"]])
-            if r["ev1"]:
-                records.append({"source": r["src"],  "target": r["mid"],
-                                "relation": r["rel1"], "evidence": r["ev1"]})
-            if r["ev2"]:
-                records.append({"source": r["mid"],  "target": r["tgt"],
-                                "relation": r["rel2"], "evidence": r["ev2"]})
+    visited = set(seeds)
+    records = []
+    for r in rows:
+        visited.update([r["seed"], r["target"]])
+        records.append({
+            "source": r["seed"],
+            "target": r["target"],
+            "relation": r["relation"],
+            "evidence": r["evidence"],
+        })
 
-    print(f"[GraphTraversal] {max_hops}-hop: {len(records)} edges, {len(visited)} entities visited.")
+    print(f"[ShortestPath] pairs={len(pairs)} -> edges={len(records)} visited={len(visited)}")
     return records, visited
 
 
@@ -305,13 +322,9 @@ def traverse_graph(seeds, E_region, C_region, book_id, driver, max_hops=1):
 
 def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
                        query_entities, tree_nodes, config):
-    """Build deduplicated candidate pool from edge evidence + entity mentions."""
-    chunk_data = {}  # chunk_id -> {is_edge_evidence, sources}
+    """Gathers all the raw text chunks that were successfully hit during our graph traversal."""
+    chunk_data = {}
 
-    # Source A: edge evidence chunks
-    # edge_count tracks how many distinct edges point to this chunk.
-    # A chunk cited by many edges is central to the local graph neighborhood
-    # and more likely to contain the answer than a chunk cited by one edge.
     for rec in records:
         for cid in rec["evidence"]:
             if cid not in chunk_data:
@@ -320,9 +333,9 @@ def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
                 chunk_data[cid]["is_edge_evidence"] = True
                 chunk_data[cid]["sources"].add("edge")
                 chunk_data[cid]["edge_count"] = chunk_data[cid].get("edge_count", 0) + 1
+
     print(f"[Candidates] Edge evidence: {len(chunk_data)} chunks.")
 
-    # Source B: entity mention chunks (optional)
     if config.get("use_entity_mention_chunks", True):
         for entity in visited:
             for cid in [c for c in I_e2c.get(entity, []) if c in C_region][:config["max_chunks_per_entity"]]:
@@ -332,27 +345,23 @@ def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
                     chunk_data[cid]["sources"].add("entity")
         print(f"[Candidates] After entity mentions: {len(chunk_data)} total (deduplicated).")
 
-    q_ents     = set(query_entities)
+    q_ents = set(query_entities)
     candidates = []
     for cid, data in chunk_data.items():
-        node_id = f"L0_{cid}" if not cid.startswith("L0_") else cid
-        text    = tree_nodes.get(node_id, {}).get("text") or tree_nodes.get(cid, {}).get("text")
+        text = tree_nodes.get(cid, {}).get("text") or tree_nodes.get(cid.replace("L0_", ""), {}).get("text")
         if not text:
             continue
+
         candidates.append({
             "chunk_id":            cid,
             "text":                text,
             "sources":             data["sources"],
             "is_edge_evidence":    data["is_edge_evidence"],
-            "edge_evidence_count": data.get("edge_count", 0),  # how many edges cite this chunk
+            "edge_evidence_count": data.get("edge_count", 0),
             "query_entity_count":  len(q_ents & set(I_c2e.get(cid, []))),
             "score":               0.0,
         })
 
-    # Sort priority:
-    #   1. is_edge_evidence   — edge-backed chunks ranked above entity-mention-only chunks
-    #   2. edge_evidence_count — among edge chunks, prefer those cited by more edges
-    #   3. query_entity_count  — tiebreaker: prefer chunks mentioning more query entities
     candidates.sort(
         key=lambda x: (x["is_edge_evidence"], x["edge_evidence_count"], x["query_entity_count"]),
         reverse=True
@@ -367,7 +376,7 @@ def collect_candidates(records, visited, C_region, I_e2c, I_c2e,
 # ---------------------------------------------------------------------------
 
 def rerank_chunks(question_only, candidates, cross_encoder, top_k):
-    """Score (question, chunk) pairs with cross-encoder; return top_k."""
+    """Uses the MS-Marco cross-encoder to give a final precision score to our candidate chunks."""
     if not candidates:
         return []
     pairs  = [(question_only, c["text"]) for c in candidates]
@@ -383,27 +392,58 @@ def rerank_chunks(question_only, candidates, cross_encoder, top_k):
 # Tree-only fallback
 # ---------------------------------------------------------------------------
 
-def tree_only_fallback(question_only, C_region, I_c2e, query_entities,
-                       tree_nodes, embedder_func, cross_encoder, config, chunk_embs=None):
-    """Fallback: skip graph, rerank region chunks with MMR + cross-encoder."""
-    print("[Fallback] Using tree-only fallback.")
-    q_ents     = set(query_entities)
+def global_tree_dense_fallback(question_only, faiss_index, node_id_list, tree_nodes, I_c2e, query_entities, embedder_func, cross_encoder, config, chunk_embs=None, faiss_k_mult=20):
+    """If the graph completely fails to find anything, we fall back to a massive vector search over the entire tree."""
+    print("[Fallback] Using GLOBAL tree dense fallback (entire RAPTOR tree).")
+
+    qv = np.array(embedder_func([question_only])[0]).reshape(1, -1).astype("float32")
+    faiss.normalize_L2(qv)
+
+    k = max(config["max_candidates"] * faiss_k_mult, 200)
+    _, idx = faiss_index.search(qv, k)
+
+    chunk_ids = []
+    for i in idx[0]:
+        if i < 0 or i >= len(node_id_list):
+            continue
+        nid = node_id_list[i]
+
+        if nid.startswith("L0_"):
+            chunk_ids.append(nid) 
+        else:
+            leaves = tree_nodes.get(nid, {}).get("leaves", [])
+            for leaf in leaves:
+                chunk_ids.append(leaf if leaf.startswith("L0_") else f"L0_{leaf}")
+
+    seen, chunk_ids_dedup = set(), []
+    for cid in chunk_ids:
+        if cid not in seen:
+            chunk_ids_dedup.append(cid)
+            seen.add(cid)
+
+    q_ents = set(query_entities)
     candidates = []
-    for cid in C_region:
-        node_id = f"L0_{cid}" if not cid.startswith("L0_") else cid
-        text    = tree_nodes.get(node_id, {}).get("text") or tree_nodes.get(cid, {}).get("text")
+    for cid in chunk_ids_dedup:
+        text = tree_nodes.get(cid, {}).get("text") or tree_nodes.get(cid.replace("L0_", ""), {}).get("text")
         if not text:
             continue
         candidates.append({
-            "chunk_id": cid, "text": text, "sources": {"fallback"},
+            "chunk_id": cid,
+            "text": text,
+            "sources": {"global_fallback"},
             "is_edge_evidence": False,
+            "edge_evidence_count": 0,
             "query_entity_count": len(q_ents & set(I_c2e.get(cid, []))),
             "score": 0.0,
         })
-    candidates.sort(key=lambda x: x["query_entity_count"], reverse=True)
-    candidates = candidates[:config["max_candidates"]]
+        if len(candidates) >= config["max_candidates"]:
+            break
+
+    print(f"[Fallback] Global candidate pool: {len(candidates)} chunks.")
+
     candidates = mmr_select(question_only, candidates, embedder_func,
                             config["mmr_top_k"], config["mmr_lambda"], chunk_embs=chunk_embs)
+
     return rerank_chunks(question_only, candidates, cross_encoder, config["final_top_k"])
 
 
@@ -412,7 +452,7 @@ def tree_only_fallback(question_only, C_region, I_c2e, query_entities,
 # ---------------------------------------------------------------------------
 
 def build_result(chunks, query_entities, seeds, mode, stats):
-    """Package retrieval output. Converts sources set->list for JSON safety."""
+    """Packages up the final chunks and stats so they can be fed to the generator LLM."""
     for c in chunks:
         if isinstance(c.get("sources"), set):
             c["sources"] = list(c["sources"])
@@ -431,7 +471,7 @@ def build_result(chunks, query_entities, seeds, mode, stats):
 # ---------------------------------------------------------------------------
 
 def retrieve(question, options, resources, config=None):
-    """Run the full C2 retrieval pipeline for one question."""
+    """The master function that orchestrates the entire C2 retrieval pipeline step-by-step."""
     cfg = {**DEFAULT_CONFIG, **(config or {})}
     stats = {}
 
@@ -446,106 +486,101 @@ def retrieve(question, options, resources, config=None):
     embedder_func = resources["embedder_func"]
     nlp           = resources["nlp"]
     cross_encoder = resources["cross_encoder"]
+    chunk_embs    = resources.get("chunk_embs")
 
-    # FAISS gets question + options; cross-encoder gets question only
-    # dataloader already bakes options into question for InfiniteChoice.
-    # For InfiniteQA there are no options so question is already clean.
-    dense_query   = question                 # used for FAISS (broad semantic match)
-    question_only = strip_options(question)  # used for cross-encoder (precise scoring)
+    dense_query   = question
+    question_only = strip_options(question)
 
     print(f"\n{'='*60}")
     print(f"[Retrieve] Q: {question_only[:80]}...")
 
-    # Step 1: entity extraction (question only)
     query_entities          = extract_entities(question_only, nlp)
     stats["query_entities"] = query_entities
     print(f"[Entities] {query_entities}")
 
-    # Step 2+3: tree pruning (FAISS + cross-encoder on summary nodes)
     top_summaries          = tree_pruning(dense_query, question_only, faiss_index,
                                           node_id_list, embedder_func, tree_nodes,
                                           cross_encoder, cfg)
     stats["top_summaries"] = top_summaries
 
     if not top_summaries:
-        fb = tree_only_fallback(question_only, set(), I_c2e, query_entities,
-                                tree_nodes, embedder_func, cross_encoder, cfg,
-                                chunk_embs=resources.get("chunk_embs"))
+        fb = global_tree_dense_fallback(question_only=question_only, faiss_index=faiss_index, node_id_list=node_id_list, tree_nodes=tree_nodes, I_c2e=I_c2e, query_entities=query_entities, embedder_func=embedder_func, cross_encoder=cross_encoder, config=cfg, chunk_embs=chunk_embs)
         return build_result(lost_in_middle_reorder(fb), query_entities,
                             [], "fallback_no_summaries", stats)
 
-    # Step 4: define region
-    C_region, E_region      = define_region(top_summaries, tree_nodes, I_s2e)
-    stats["region_chunks"]  = len(C_region)
-    stats["region_entities"]= len(E_region)
+    C_region, E_region       = define_region(top_summaries, tree_nodes, I_s2e)
+    stats["region_chunks"]   = len(C_region)
+    stats["region_entities"] = len(E_region)
 
-    # Step 5: seed selection (fuzzy matching only, no frequency fallback)
-    seeds, seed_strategy    = select_seeds(query_entities, E_region, cfg)
-    stats["seeds"]          = seeds
-    stats["seed_strategy"]  = seed_strategy
+    seeds, seed_strategy     = select_seeds(query_entities, E_region, cfg)
+    stats["seeds"]           = seeds
+    stats["seed_strategy"]   = seed_strategy
 
     if not seeds:
-        fb = tree_only_fallback(question_only, C_region, I_c2e, query_entities,
-                                tree_nodes, embedder_func, cross_encoder, cfg,
-                                chunk_embs=resources.get("chunk_embs"))
-        return build_result(lost_in_middle_reorder(fb), query_entities,
-                            [], f"fallback_{seed_strategy}", stats)
+        fb = global_tree_dense_fallback(question_only=question_only, faiss_index=faiss_index, node_id_list=node_id_list, tree_nodes=tree_nodes, I_c2e=I_c2e, query_entities=query_entities, embedder_func=embedder_func, cross_encoder=cross_encoder, config=cfg, chunk_embs=chunk_embs)
+        return build_result(lost_in_middle_reorder(fb), query_entities, [], f"fallback_{seed_strategy}", stats)
 
-    # Step 6: graph traversal (1-hop or 2-hop within region)
-    print(f"[Step 6] Graph traversal  max_hops={cfg['max_hops']}  seeds={seeds}")
+    print(f"[Step 6] Shortest-path  max_hops={cfg['shortest_max_hops']}  seeds={seeds}")
+
+    key_targets = rank_key_entities(
+        question_only=question_only,
+        E_region=E_region,
+        I_e2c=I_e2c,
+        chunk_embs=chunk_embs,
+        embedder_func=embedder_func,
+        top_k=cfg["key_top_k"],
+        topn_chunks=cfg["entity_topn_chunks"],
+        exclude=set(seeds),
+    )
+    stats["key_targets"] = key_targets
+
     try:
-        records, visited = traverse_graph(seeds, E_region, C_region,
-                                          book_id, neo4j_driver, cfg["max_hops"])
+        records, visited = shortest_path_batch(
+            seeds=seeds,
+            key_targets=key_targets,
+            C_region=C_region,
+            book_id=book_id,
+            driver=neo4j_driver,
+            max_hops=cfg["shortest_max_hops"],
+        )
     except Exception as e:
-        logger.error(f"Graph traversal failed: {e}")
+        logger.error(f"Shortest path failed: {e}")
         records, visited = [], set(seeds)
 
     stats["relations_found"] = len(records)
     print(f"[Step 6] Result: {len(records)} edges found, {len(visited)} entities visited")
 
-    # Step 7: collect candidates (deduplicated by chunk_data dict)
     candidates                     = collect_candidates(records, visited, C_region,
                                                         I_e2c, I_c2e, query_entities,
                                                         tree_nodes, cfg)
     stats["candidates_before_mmr"] = len(candidates)
-    print(f"[Step 7] Candidates after graph collection: {len(candidates)}")
+    print(f"[Step 7] Candidates after collection: {len(candidates)}")
 
     if len(candidates) < cfg["min_candidates"]:
-        print(f"[Step 7] Too few candidates (<{cfg['min_candidates']}), using fallback.")
-        fb = tree_only_fallback(question_only, C_region, I_c2e, query_entities,
-                                tree_nodes, embedder_func, cross_encoder, cfg,
-                                chunk_embs=resources.get("chunk_embs"))
-        return build_result(lost_in_middle_reorder(fb), query_entities,
-                            seeds, "fallback_no_candidates", stats)
+        print(f"[Step 7] Too few candidates (<{cfg['min_candidates']}), using GLOBAL fallback.")
+        fb = global_tree_dense_fallback(question_only=question_only, faiss_index=faiss_index, node_id_list=node_id_list, tree_nodes=tree_nodes, I_c2e=I_c2e, query_entities=query_entities, embedder_func=embedder_func, cross_encoder=cross_encoder, config=cfg, chunk_embs=chunk_embs)
+        return build_result(lost_in_middle_reorder(fb), query_entities, seeds, "fallback_no_candidates", stats)
 
-    # Step 8: MMR -> diverse subset (e.g. 50 -> 20)
-    candidates                    = mmr_select(question_only, candidates, embedder_func,
-                                               cfg["mmr_top_k"], cfg["mmr_lambda"],
-                                               chunk_embs=resources.get("chunk_embs"))
+    candidates = mmr_select(question_only, candidates, embedder_func, cfg["mmr_top_k"], cfg["mmr_lambda"], chunk_embs=chunk_embs)
     stats["candidates_after_mmr"] = len(candidates)
     print(f"[Step 8] After MMR: {len(candidates)} chunks")
 
-    # Step 9: cross-encoder rerank (question only, no options) -> top 15
-    top_chunks            = rerank_chunks(question_only, candidates,
-                                          cross_encoder, cfg["final_top_k"])
+    top_chunks = rerank_chunks(question_only, candidates, cross_encoder, cfg["final_top_k"])
     stats["final_chunks"] = len(top_chunks)
     print(f"[Step 9] After cross-encoder rerank: {len(top_chunks)} chunks")
 
-    # Step 10: Lost-in-the-Middle reorder before passing to LLM
     top_chunks = lost_in_middle_reorder(top_chunks)
     print(f"[Step 10] After Lost-in-Middle reorder: {len(top_chunks)} chunks -> sending to LLM")
     print(f"{'='*60}\n")
-    return build_result(top_chunks, query_entities, seeds, "graph_traversal", stats)
+    return build_result(top_chunks, query_entities, seeds, "shortest_path", stats)
 
 
 # ---------------------------------------------------------------------------
 # Resource loader
 # ---------------------------------------------------------------------------
 
-def load_retriever(cache_dir, book_id, neo4j_uri, neo4j_user, neo4j_password,
-                   embedder_func, spacy_model="en_core_web_lg",
-                   cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-6-v2"):
-    """Load all artifacts for one book from cache."""
+def load_retriever(cache_dir, book_id, neo4j_uri, neo4j_user, neo4j_password, embedder_func, spacy_model="en_core_web_lg", cross_encoder_model="cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    """Loads all the models, FAISS indexes, and Neo4j connections into memory."""
     from neo4j import GraphDatabase
     from sentence_transformers import CrossEncoder
 
@@ -553,10 +588,7 @@ def load_retriever(cache_dir, book_id, neo4j_uri, neo4j_user, neo4j_password,
         with open(os.path.join(cache_dir, path), "r", encoding="utf-8") as f:
             return json.load(f)
 
-    # Load precomputed embeddings for all nodes (L0 chunks + summary nodes)
-    # These were saved during indexing in save_tree() -> embeddings.npz
-    # Used by MMR to avoid re-embedding chunks at query time
-    raw_embs   = np.load(os.path.join(cache_dir, "summary_tree", "embeddings.npz"))
+    raw_embs = np.load(os.path.join(cache_dir, "summary_tree", "embeddings.npz"))
     chunk_embs = {nid: raw_embs[nid].astype("float32") for nid in raw_embs.files}
 
     resources = {
@@ -571,8 +603,9 @@ def load_retriever(cache_dir, book_id, neo4j_uri, neo4j_user, neo4j_password,
         "embedder_func": embedder_func,
         "nlp":           spacy.load(spacy_model),
         "cross_encoder": CrossEncoder(cross_encoder_model),
-        "chunk_embs":    chunk_embs,   # precomputed embeddings, keyed by node_id
+        "chunk_embs":    chunk_embs,
     }
+
     driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
     with driver.session() as s:
         s.run("RETURN 1")

@@ -9,13 +9,27 @@ import time
 import re
 import traceback
 import logging
+import importlib
 import numpy as np
 from dotenv import load_dotenv
 
-from C2_retrieval import load_retriever, retrieve
 from dataloader import load_dataset
 from llm import get_embeddings, call_llm, unload_model
 from prompts import PROMPT_CHOICE, PROMPT_OPEN
+
+# Switch between retrieval strategies by changing this single line.
+# "shortest_path" uses C2_retrieval.py (the main method)
+# "hop" uses C2_retrieval_hop.py (1-hop or 2-hop graph traversal)
+RETRIEVAL_METHOD = "shortest_path"  
+
+_module_map = {
+    "shortest_path": "C2_retrieval",
+    "hop": "C2_retrieval_hop",
+}
+_retrieval_module = importlib.import_module(_module_map[RETRIEVAL_METHOD])
+load_retriever = _retrieval_module.load_retriever
+retrieve = _retrieval_module.retrieve
+print(f"[Config] Using retrieval module: {_module_map[RETRIEVAL_METHOD]}")
 
 # Main settings
 DATASET_NAME = "InfiniteChoice"

@@ -155,11 +155,3 @@ Project_TGR/
 | **Embeddings** | BAAI/bge-m3 | 1024-dim vectors, loaded via SentenceTransformers |
 | **NER** | SpaCy en_core_web_lg | Entity extraction |
 | **Cross-Encoder** | ms-marco-MiniLM-L-6-v2 | Reranking in C2 pipeline |
-
-## Requirements
-
-Install all Python dependencies:
-```bash
-pip install -r requirements.txt
-python -m spacy download en_core_web_lg
-```

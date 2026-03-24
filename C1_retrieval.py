@@ -1,13 +1,11 @@
 """
-This is our Baseline C1 Retrieval engine. It tries to use the Neo4j graph to find exact shortest-path connections 
-between entities mentioned in the user's question. If it can't find anything in the graph, it falls back to a 
-standard FAISS dense vector search over the summary tree.
+Retriever module combining Neo4j graph traversal with FAISS dense retrieval.
+Supports global (dense), local (graph), and hybrid retrieval strategies.
 """
 
 import json
 import re
 import copy
-
 import numpy as np
 import faiss
 import spacy
@@ -21,7 +19,7 @@ PRONOUN_LIKE = {"he", "she", "it", "they", "we", "i", "you", "this", "that"}
 
 
 class Retriever:
-    """The main retriever class that handles talking to Neo4j and our FAISS indexes."""
+    """E2GraphRAG-style retriever with Neo4j graph and FAISS dense retrieval."""
     
     def __init__(self, tree: Dict, neo4j_driver, book_id: str,
                  I_e2c: Dict, I_c2e: Dict, I_s2e: Dict, I_e2s: Dict,
@@ -32,11 +30,11 @@ class Retriever:
         self.driver = neo4j_driver
         self.book_id = book_id
         
-        # Dictionaries to quickly look up which entities are in which chunks/summaries
-        self.I_e2c = I_e2c  
-        self.I_c2e = I_c2e  
-        self.I_s2e = I_s2e  
-        self.I_e2s = I_e2s  
+        # Indexes
+        self.I_e2c = I_e2c  # entity to chunk_ids
+        self.I_c2e = I_c2e  # chunk_id to entities
+        self.I_s2e = I_s2e  # summary_node to entities
+        self.I_e2s = I_e2s  # entity to summary_nodes
         
         # Dense retrieval
         self.faiss_index = faiss_index
@@ -48,8 +46,8 @@ class Retriever:
         self.max_chunk_setting = kwargs.get("max_chunk_setting", 25)
         self.shortest_path_k = kwargs.get("shortest_path_k", 4)
 
-    def extract_query_entities(self, query: str):
-        """Runs the user's question through SpaCy to figure out exactly who or what they are asking about."""
+    def extract_query_entities(self, query: str) -> List[str]:
+        """Extract and canonicalize entities from query using SpaCy NER."""
         # If query contains options (starts with 'A. '), extract only the question part
         if "\nA. " in query:
             query = query.split("\nA. ")[0]
@@ -70,8 +68,8 @@ class Retriever:
         
         return list(entities)
 
-    def graph_filter(self, entities: list, k: int):
-        """Looks at all pairs of entities from the question and asks Neo4j if they are connected within 'k' hops."""
+    def graph_filter(self, entities: List[str], k: int) -> List[Tuple[str, str]]:
+        """Find entity pairs with shortest path <= k hops in Neo4j."""
         pairs = []
         for head, tail in combinations(entities, 2):
             length = self._get_shortest_path_length(head, tail)
@@ -79,8 +77,8 @@ class Retriever:
                 pairs.append((head, tail))
         return pairs
     
-    def _get_shortest_path_length(self, e1: str, e2: str):
-        """A tiny helper to run the exact shortestPath Cypher query against Neo4j."""
+    def _get_shortest_path_length(self, e1: str, e2: str) -> Optional[int]:
+        """Query Neo4j for shortest path length between entities."""
         query = """
         MATCH (a:Entity {name: $name1, book_id: $book_id}),
               (b:Entity {name: $name2, book_id: $book_id}),
@@ -95,8 +93,8 @@ class Retriever:
         except Exception as e:
             return None
 
-    def index_mapping(self, entities: list):
-        """Takes our found entities and figures out exactly which raw context chunks mention them."""
+    def index_mapping(self, entities: list) -> Dict[str, List[str]]:
+        """Map entities/pairs to chunk IDs. Pairs use intersection."""
         chunk_ids = {}
         
         for entity in entities:
@@ -116,8 +114,8 @@ class Retriever:
         
         return chunk_ids
     
-    def merge_keys(self, res: dict):
-        """If a chunk mentions multiple entities we're looking for, we merge its keys together so we don't process it twice."""
+    def merge_keys(self, res: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """Merge chunks appearing under multiple entity keys."""
         chunks_to_keys = defaultdict(set)
         for key, chunks in res.items():
             for chunk in chunks:
@@ -136,10 +134,10 @@ class Retriever:
         
         return merged
 
-    def local_retrieval(self, entities: list, k: int, allow_fallback: bool = True):
-        """This tries to find graph pairs first. If it can't find pairs but allow_fallback is True, it returns chunks that just mention the individual entities."""
+    def local_retrieval(self, entities: List[str], k: int, allow_fallback: bool = True) -> Dict[str, List[str]]:
+        """Graph-based retrieval: find pairs, map to chunks, merge keys."""
         if len(entities) < 2:
-            return {} # If there's only one entity, we can't find a path between pairs, so force a fallback
+            return {} # Force fallback to Occurrence Ranking (Dense + Entity)
 
         pairs = self.graph_filter(entities, k)
         
@@ -152,19 +150,18 @@ class Retriever:
              
         return self.merge_keys(init_chunks)
     
-    def dense_retrieval(self, query: str, k: int):
-        """The classic vector search fallback. Embeds the question and grabs the most mathematically similar chunks from FAISS."""
-        # print(f"dense_retrieval: embedding query '{query[:50]}...'")
+    def dense_retrieval(self, query: str, k: int) -> Dict[str, List[str]]:
+        """FAISS dense retrieval over all tree nodes."""
         query_embed = np.array(self.embedder_func(query)).reshape(1, -1).astype('float32')
-        # print("dense_retrieval: searching FAISS index...")
         _, indices = self.faiss_index.search(query_embed, k=k)
         
         candidates = [self.node_id_list[i] for i in indices[0] 
                       if 0 <= i < len(self.node_id_list)]
         return {"": candidates}
 
-    def occurrence_ranking(self, candidates: list, entities: list, top_k: int):
-        """Takes a list of candidate chunks and ranks them based on how often our query entities actually show up in them."""
+    def occurrence_ranking(self, candidates: List[str], entities: List[str], 
+                          top_k: int) -> Dict[str, List[str]]:
+        """Rank candidates by entity occurrence count."""
         scores = [self._count_entity_matches(c, entities) for c in candidates]
         sorted_idx = np.argsort(scores)[::-1]
         
@@ -175,8 +172,9 @@ class Retriever:
         res = self._assign_entity_keys(filtered, entities)
         return self.merge_keys(res) if res else {"": filtered}
     
-    def entityaware_filter(self, candidates: dict, entities: list, top_k: int):
-        """A stricter filter that prioritizes chunks which contain multiple different target entities at once."""
+    def entityaware_filter(self, candidates: Dict[str, List[str]], 
+                          entities: List[str], top_k: int) -> Dict[str, List[str]]:
+        """Filter by entity count in key and chunk coverage."""
         info = []
         for key, nodes in candidates.items():
             for node in nodes:
@@ -194,8 +192,8 @@ class Retriever:
             result.setdefault(key, []).append(item["node"])
         return self.merge_keys(result)
 
-    def _count_entity_matches(self, node_id: str, entities: list):
-        """Simply checks how many of our target entities exist inside a specific node."""
+    def _count_entity_matches(self, node_id: str, entities: List[str]) -> int:
+        """Count query entities present in a node."""
         chunk_id = node_id  # IDs are now aligned (L0_chunk_X)
         
         # Try chunk lookup (I_c2e uses chunk_X format)
@@ -212,8 +210,8 @@ class Retriever:
         
         return len(set(entities) & node_entities)
     
-    def _assign_entity_keys(self, nodes: list, entities: list):
-        """Tags nodes with the specific entities they contain so we can track them easier."""
+    def _assign_entity_keys(self, nodes: List[str], entities: List[str]) -> Dict[str, List[str]]:
+        """Assign entity keys to nodes based on contained entities."""
         result = {}
         for node_id in nodes:
             chunk_id = node_id  # IDs are now aligned
@@ -236,11 +234,11 @@ class Retriever:
         
         return result
     
-    def _count_chunks(self, res: dict):
+    def _count_chunks(self, res: Dict[str, List[str]]) -> int:
         return sum(len(v) for v in res.values())
     
-    def format_res(self, res: dict):
-        """Combines the extracted chunks into one big string that we'll eventually feed to the Generator LLM."""
+    def format_res(self, res: Dict[str, List[str]]) -> str:
+        """Format results for LLM prompt. Handles both chunk_X and L0_chunk_X formats."""
         parts = []
         for key, nodes in res.items():
             for node_id in nodes:
@@ -257,10 +255,14 @@ class Retriever:
                 parts.append(f"{key}: {text}" if key else text)
         return "\n\n".join(parts)
 
-    def query(self, question: str, full_query: str = None, **kwargs):
+    def query(self, question: str, full_query: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
-        This is the main brain of the C1 baseline. It adaptively decides whether to use the graph, 
-        fallback to dense vector search, or do a mix of both depending on what it finds.
+        Main retrieval implementing E2GraphRAG adaptive strategy.
+        
+        Args:
+            question: The question text (used for Entity Extraction).
+            full_query: content for dense retrieval (e.g. Question + Options). 
+                        If None, defaults to `question`.
         """
         max_chunks = kwargs.get("max_chunk_setting", self.max_chunk_setting)
         k = kwargs.get("shortest_path_k", self.shortest_path_k)
@@ -270,30 +272,28 @@ class Retriever:
         
         # Step 1: Extract entities from Question Only
         entities = self.extract_query_entities(question)
-
         
-        # If the question had no named entities, we can't use the graph. Go straight to vector search.
+        # Step 2: No entities found, fall back to global dense retrieval
         if not entities:
             print("No entities -> Global Search")
             res = self.dense_retrieval(dense_input, max_chunks)
             return self._build_result(res, entities, "Global Search", [])
         
-        # Try to find structural graph paths between the entities.
+        # Step 3: Local retrieval (Graph-based, using Entities)
         print("Starting local retrieval...")
         local_res = self.local_retrieval(entities, k)
         count = self._count_chunks(local_res)
         history = [(k, count)]
         print(f"Local: k={k}, count={count}")
         
-        # If there are no paths in the graph, we do a wide vector search and rerank the results based on entity mentions.
+        # Step 4: Zero graph results, use dense retrieval ranked by entity occurrence
         if count == 0:
             print("Local=0 to Occurrence Rerank")
-            # Dense retrieval gets 2x candidates to filtered by Entities
             dense = self.dense_retrieval(dense_input, max_chunks * 2)
             res = self.occurrence_ranking(dense.get("", []), entities, max_chunks)
             return self._build_result(res, entities, "Occurrence Rerank", history)
         
-        # If the graph returned WAY too many chunks, we shrink the allowed hop distance to tighten the net.
+        # Step 5: Too many to Iterative tightening
         prev_res = None
         while count > max_chunks:
             prev_res = copy.deepcopy(local_res)
@@ -307,12 +307,12 @@ class Retriever:
             history.append((k, count))
             print(f"Tighten: k={k}, count={count}")
         
-        # We got a good amount of chunks, bundle them up and return them!
+        # Step 6: Return result
         if count > 0:
             rtype = f"Local, Loop for {len(history)-1} times"
             return self._build_result(local_res, entities, rtype, history)
         
-        # If tightening the hops made us lose all our chunks, we fall back to the previous hop radius and heavily filter it.
+        # Tightening removed all results, apply entity-aware filter on the previous batch
         print("Tightening hit 0 -> EntityAware Filter")
         if prev_res:
             res = self.entityaware_filter(prev_res, entities, max_chunks)
@@ -324,7 +324,7 @@ class Retriever:
         
         return self._build_result(res, entities, rtype, history)
     
-    def _build_result(self, res: dict, entities: list, rtype: str, history: list):
+    def _build_result(self, res: Dict, entities: List, rtype: str, history: List) -> Dict:
         return {
             "chunks": self.format_res(res),
             "chunk_ids": res,
@@ -338,8 +338,8 @@ class Retriever:
 def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
                               neo4j_user: str, neo4j_password: str,
                               embedder_func, spacy_model: str = "en_core_web_lg",
-                              **kwargs):
-    """A convenient setup function that reads everything from the hard drive and initializes our retriever perfectly."""
+                              **kwargs) -> Retriever:
+    """Load retriever with all artifacts from cache directory."""
     import os
     from neo4j import GraphDatabase
     
@@ -366,15 +366,12 @@ def load_retriever_from_cache(cache_dir: str, book_id: str, neo4j_uri: str,
     driver = GraphDatabase.driver(
         neo4j_uri, 
         auth=(neo4j_user, neo4j_password),
-        notifications_min_severity="WARNING", # Suppress INFO/PERFORMANCE
-        # Or you can disable categories specifically if your driver version supports it
+        notifications_min_severity="WARNING",
     )
     with driver.session() as s:
         s.run("RETURN 1")
     
     nlp = spacy.load(spacy_model)
-    
-
     
     return Retriever(
         tree=tree, neo4j_driver=driver, book_id=book_id,

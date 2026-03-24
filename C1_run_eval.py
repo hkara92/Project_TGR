@@ -1,9 +1,7 @@
 """
-C1_run_eval.py
-
-Evaluates the C1 retrieval pipeline. For each book, retrieves
-evidence for every question, generates an answer with the LLM,
-and saves predictions to a JSON file.
+This script puts our Baseline C1 retriever to the test. 
+It loops through all the questions in our dataset, asks the retriever to find the relevant chunks 
+from the graph or FAISS, feeds those chunks into the LLM, and then saves the final answers to a JSON file.
 """
 
 import json
@@ -23,7 +21,7 @@ logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
-# config
+# Main evaluation settings
 DATASET_NAME = "InfiniteChoice"
 DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl")
 
@@ -50,31 +48,22 @@ def embed_wrapper(text):
 
 def extract_answer(llm_output):
     """
-    Extract A/B/C/D from LLM output.
-
-    Priority order:
-    1. Clean single-letter answer at start: "A", "A.", "A:" with nothing after
-       (what the prompt asks for). Does NOT match "A word..." to avoid treating
-       the article "A" as an answer choice.
-    2. Explicit label: "Answer: B", "The answer is C", "Answer is: D"
-    3. Last standalone letter in the text: if the LLM reasoned verbosely before
-       concluding, the answer letter is almost always at the END, not the start.
-       e.g. "A detailed analysis shows the answer is C" -> last = C (correct)
-    4. Fallback: "Z" (counted as wrong in metrics)
+    Extracts the correct A, B, C, or D answer from the LLM's output using Regex.
+    Falls back to "Z" (incorrect) if no valid letter is found.
     """
     cleaned = llm_output.strip().upper()
 
-    # 1. Pure letter answer at start, optionally with punctuation but nothing else after
+    # First priority: The LLM followed instructions and just gave us a single letter, maybe with a period.
     match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\s*$|[.:\)]\s*$|[.:\)]\s+)", cleaned)
     if match:
         return match.group(1)
 
-    # 2. Explicit "Answer: B" or "The answer is C" or "Answer is: D"
+    # Second priority: The LLM was a bit chatty but explicitly stated "The answer is C".
     match = re.search(r"(?:ANSWER\s*(?:IS\s*)?[:\-]?\s*|THE\s+ANSWER\s+IS\s+)([A-D])\b", cleaned)
     if match:
         return match.group(1)
 
-    # 3. Last standalone A-D in the text (handles verbose reasoning then conclusion)
+    # Third priority: The LLM wrote a whole essay. Often the final conclusion is at the very end, so we grab the last standalone letter.
     all_matches = re.findall(r"\b([A-D])\b", cleaned)
     if all_matches:
         return all_matches[-1]
@@ -84,7 +73,7 @@ def extract_answer(llm_output):
 
 
 def evaluate_book(raw_book_id, dataset):
-    """Evaluate a single book."""
+    """Runs the full retrieval and LLM generation pipeline for a single book."""
     book_id_label = f"{DATASET_NAME}_{raw_book_id}"
     cache_dir = os.path.join("cache", DATASET_NAME, raw_book_id)
 
@@ -101,7 +90,7 @@ def evaluate_book(raw_book_id, dataset):
         print(f"  Cache not found: {cache_dir}, skipping.")
         return
 
-    # load retriever
+    # Boot up the C1 retriever using all our cached graph and vector data
     retriever = load_retriever_from_cache(
         cache_dir=cache_dir,
         book_id=book_id_label,
@@ -121,7 +110,7 @@ def evaluate_book(raw_book_id, dataset):
         q_graph = qa["question"]
         q_dense = qa["question"]
 
-        # Retrieval
+        # Step 1: Let the C1 engine find the best chunks of evidence
         print(f"  Q{i}/{len(qa_pairs)-1}: Retrieving...")
         t_start_retrieval = time.time()
         result = retriever.query(question=q_graph, full_query=q_dense) 
@@ -131,7 +120,7 @@ def evaluate_book(raw_book_id, dataset):
         n_chunks = result.get('len_chunks', 0)
         print(f"  Q{i}/{len(qa_pairs)-1}: {n_chunks} chunks retrieved via [{rtype}] (qtime={retrieval_time:.2f}s)")
 
-        # LLM generation
+        # Step 2: Feed that evidence and the question into the Generator LLM to get a final answer
         print(f"  Q{i}/{len(qa_pairs)-1}: LLM generating answer...")
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         final_prompt = prompt_template.format(question=qa["question"], evidence=evidence_text)
@@ -147,7 +136,7 @@ def evaluate_book(raw_book_id, dataset):
         else:
             final_pred = llm_output.strip()
 
-        # Result
+        # Step 3: Parse out the answer and record exactly how we performed
         labels = ["A", "B", "C", "D"]
         gt_idx = labels.index(qa["answer"]) if qa["answer"] in labels else -1
         ground_truth_text = qa["options"][gt_idx] if 0 <= gt_idx < len(qa["options"]) else str(qa["answer"])
@@ -172,7 +161,7 @@ def evaluate_book(raw_book_id, dataset):
             "retrieval_time": retrieval_time,
         })
 
-    # save predictions
+    # Dump everything to disk so we can analyze the metrics later
     out_file = os.path.join(cache_dir, "predictions.json")
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
@@ -198,7 +187,7 @@ def main():
     else:
         ids = [int(BOOK_ID_TO_EVAL)]
 
-    # Pre-load all models before any progress bars
+    # Let's get the heavy LLMs into memory early so it doesn't mess up our timing metrics later
     print("\nPre-loading models...")
     preload_models(llm_model=LLM_MODEL_NAME)
     print()

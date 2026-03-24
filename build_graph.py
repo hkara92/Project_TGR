@@ -1,13 +1,16 @@
+"""Reads extracted edges from cache and uploads them into Neo4j as Entity nodes and RELATION edges."""
+
+import os
+import json
+import time
 from neo4j import GraphDatabase
-import os, json, time
 from tqdm import tqdm
 
 NEO4J_URI = "bolt://127.0.0.1:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
 
-# ---- Main Configuration ----
-# Change this variable if you want to switch to a different dataset.
+# Main settings
 DATASET_NAME = "InfiniteChoice"  # "InfiniteChoice", "InfiniteQA", or "NovelQA"
 
 BASE_CACHE_DIR = f"./cache/{DATASET_NAME}"
@@ -18,33 +21,30 @@ CREATE_CHUNK_NODES = True
 # Configuration
 RUN_MODE = "all"  # Options: "single", "range", "all"
 
-# If you just want to process one specific book, put its index here.
-BOOK_IDX = 0
+BOOK_IDX = 0              # for single mode
 
-# If you want to process a specific chunk of books, set the start and end here (the end is not included).
-RANGE_START = 0
+RANGE_START = 0           # for range mode
 RANGE_END = 20
 
-# For "all" mode
 TOTAL_BOOKS = 58
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 
 def idx_to_book_id(i: int):
-    """We prefix the book ID with the dataset name so that books from different datasets don't crash into each other in Neo4j."""
+    """Prefixes the book index with the dataset name to avoid collisions in Neo4j."""
     return f"{DATASET_NAME}_{i}"
 
 
 def load_triples(cache_dir):
-    """Loads the merged graph edges we extracted earlier."""
+    """Loads merged edges from edges.json."""
     path = os.path.join(cache_dir, "edges.json")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def setup_schema(tx):
-    """Sets up some strict rules in Neo4j to make sure we don't accidentally create duplicate nodes or bad data."""
+    """Creates uniqueness constraints and indexes on Entity/Chunk nodes."""
     tx.run("""
     CREATE CONSTRAINT entity_unique IF NOT EXISTS
     FOR (e:Entity)
@@ -77,12 +77,12 @@ def setup_schema(tx):
 
 
 def clear_db(tx):
-    """A dangerous but handy function that completely wipes everything in the database."""
+    """Wipes all nodes and relationships from the database."""
     tx.run("MATCH (n) DETACH DELETE n")
 
 
 def normalize(triple, book_id):
-    """Cleans up the raw data from our JSON files so it fits nicely into our graph schema."""
+    """Cleans and normalizes a raw edge dict for insertion into Neo4j."""
     chunk_ids = triple.get("chunk_ids", []) or []
     if not isinstance(chunk_ids, list):
         chunk_ids = [chunk_ids]
@@ -99,10 +99,7 @@ def normalize(triple, book_id):
 
 
 def insert_triple(tx, row):
-    """
-    The actual Cypher query that pushes our data into Neo4j.
-    MERGE means it will only create the entities if they don't already exist.
-    """
+    """MERGEs source/target Entity nodes and the RELATION edge between them."""
     q = """
     MERGE (s:Entity {book_id: $book_id, name: $source})
     MERGE (t:Entity {book_id: $book_id, name: $target})

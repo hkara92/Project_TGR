@@ -151,9 +151,7 @@ Project_TGR/
 
 | Component | Model | Notes |
 |---|---|---|
-| **Text Generation** | Qwen2.5-7B-Instruct (local) | Loaded via HuggingFace Transformers |
-| **Text Generation** | GPT-5-mini (API) | Via OpenAI API |
-| **Text Generation** | LM Studio (local) | Any model loaded in LM Studio |
+| **Text Generation** | LM Studio / Qwen2.5-7B-Instruct / GPT-5-mini | LM Studio (used in this project), Qwen via HuggingFace Transformers locally, or GPT-5-mini via OpenAI API |
 | **Embeddings** | BAAI/bge-m3 | 1024-dim vectors, loaded via SentenceTransformers |
 | **NER** | SpaCy en_core_web_lg | Entity extraction |
 | **Cross-Encoder** | ms-marco-MiniLM-L-6-v2 | Reranking in C2 pipeline |

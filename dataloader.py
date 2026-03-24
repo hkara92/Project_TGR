@@ -5,15 +5,13 @@ from typing import Dict, Any
 
 def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
     """
-    Load NovelQA dataset.       
-    Returns:
-        List of book dictionaries with unified format
+    Loads the NovelQA dataset from the specified path.
+    Returns a dictionary of books, where each book has its text and QA pairs.
     """
     books_path = os.path.join(data_path, "Books")
     qa_path = os.path.join(data_path, "Data")
     
     # Load all book texts
-    
     book_texts = {}
     
     for category in os.listdir(books_path):
@@ -25,8 +23,8 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
             if not filename.endswith(".txt"):
                 continue
             
-            # Extract book_id: "B00.txt" -> "00", "B45.txt" -> "45"
-            book_id = filename[1:-4]  # Remove 'B' prefix and '.txt' suffix
+            # Get the book ID from the filename (e.g., changing "B00.txt" to "00")
+            book_id = filename[1:-4]  # Drop the "B" at the start and ".txt" at the end
             
             filepath = os.path.join(category_path, filename)
             with open(filepath, "r", encoding="utf-8") as f:
@@ -44,8 +42,8 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
             if not filename.endswith(".json"):
                 continue
             
-            # Extract book_id: "B00.json" -> "00", "B45.json" -> "45"
-            book_id = filename[1:-5]  # Remove 'B' prefix and '.json' suffix
+            # Get the book ID from the QA file (e.g., changing "B00.json" to "00")
+            book_id = filename[1:-5]  # Drop the "B" at the start and ".json" at the end
             
             filepath = os.path.join(category_path, filename)
             with open(filepath, "r", encoding="utf-8") as f:
@@ -53,7 +51,7 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
             
             book_qa[book_id] = qa_data
     
-    # Combine into unified format (dict keyed by book_id)
+    # Put everything together into a single dictionary organized by book ID
     results = {}
     
     for book_id in sorted(book_texts.keys(), key=lambda x: int(x)):
@@ -61,11 +59,11 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
             print(f"Warning: No QA found for book {book_id}, skipping")
             continue
         
-        #  Format QA pairs
+        # Organize the questions and answers
         qa_pairs = []
         for qa_id, qa_item in book_qa[book_id].items():
-            # Extract options as list [A_text, B_text, C_text, D_text]
-            # Use .get() to handle cases where some options might be missing
+            # Put the four multiple choice options into a simple list
+            # We use .get() here just in case a question is missing an option
             opt = qa_item.get("Options", {})
             options = [
                 opt.get("A", ""),
@@ -77,7 +75,7 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
             qa_pairs.append({
                 "question": qa_item["Question"],
                 "options": options,
-                "answer": qa_item["Gold"]  # "A", "B", "C", or "D"
+                "answer": qa_item["Gold"]  # The correct answer letter
             })
         
         results[book_id] = {
@@ -91,12 +89,10 @@ def load_novelqa(data_path: str) -> Dict[str, Dict[str, Any]]:
 
 def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
     """
-    Load InfiniteChoice (InfiniteBench longbook_choice_eng) dataset.   
-    Returns:
-        List of book dictionaries with unified format
+    Loads the longbook_choice_eng task from the InfiniteBench dataset.
+    Returns a dictionary of books, each containing the book text and its QA pairs.
     """
-    # Group questions by context (book text)
-    # Multiple questions can share the same context
+    # Because one book can have multiple questions, we group all questions that share the same book text together.
     context_to_data = {}
     
     with open(data_path, "r", encoding="utf-8") as f:
@@ -113,10 +109,10 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
             
             context = item["context"]
             question = item["input"]
-            options = item["options"]  # List of 4 options
-            answer_text = item["answer"]  # Answer is the text, not the letter
+            options = item["options"]  # The list of choices
+            answer_text = item["answer"]  # The actual answer text (not just "A" or "B")
             
-            # Convert answer text to letter (A, B, C, D)
+            # We need to figure out which letter (A, B, C, or D) corresponds to the answer text
             answer_letter = None
             for i, opt in enumerate(options):
                 if opt == answer_text:
@@ -124,7 +120,7 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
                     break
             
             if answer_letter is None:
-                # Sometimes answer might be in a list
+                # In some edge cases, the dataset puts the answer inside a list, so we handle that here
                 if isinstance(answer_text, list) and len(answer_text) > 0:
                     for i, opt in enumerate(options):
                         if opt == answer_text[0]:
@@ -135,21 +131,21 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
                 print(f"Warning: Could not match answer '{answer_text}' to options, skipping")
                 continue
             
-            # Group by context
+            # Add the question to the right book
             if context not in context_to_data:
                 context_to_data[context] = []
             
-            # Augment question with options for retrieval context
+            # Attach the multiple choice options directly to the question text to help with retrieval
             formatted_options = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(options)])
             augmented_question = f"{question}\n{formatted_options}"
 
             context_to_data[context].append({
-                "question": augmented_question,  # Now includes options
+                "question": augmented_question,  # We use the combined question and options here
                 "options": options,
                 "answer": answer_letter
             })
     
-    # Convert to dict format keyed by book_id
+    # Package everything up into a dictionary using the book index as the ID
     results = {}
     for i, (context, qa_pairs) in enumerate(context_to_data.items()):
         book_id = str(i)
@@ -164,10 +160,9 @@ def load_infinite_choice(data_path: str) -> Dict[str, Dict[str, Any]]:
 
 def load_infinite_qa(data_path: str) -> Dict[str, Dict[str, Any]]:
     """
-    Load InfiniteQA (InfiniteBench longbook_qa_eng) dataset.
-    This is an open-ended QA task (no multiple-choice options).
-    Returns:
-        Dict keyed by book_id with unified format
+    Loads the longbook_qa_eng task from the InfiniteBench dataset.
+    Unlike the choice tasks, this is open-ended QA so there are no multiple choice options.
+    Returns a dictionary of books with their text and QA pairs.
     """
     context_to_data = {}
 
@@ -185,7 +180,8 @@ def load_infinite_qa(data_path: str) -> Dict[str, Dict[str, Any]]:
 
             context = item["context"]
             question = item["input"]
-            # answer is a list of strings; join them
+            
+            # The answers come as a list of strings, so we just join them together with a semicolon
             raw_answer = item["answer"]
             if isinstance(raw_answer, list):
                 answer = "; ".join(raw_answer)
@@ -197,7 +193,7 @@ def load_infinite_qa(data_path: str) -> Dict[str, Dict[str, Any]]:
 
             context_to_data[context].append({
                 "question": question,
-                "options": [],       # open-ended, no options
+                "options": [],       # Keep this empty since it's an open-ended question
                 "answer": answer
             })
 
@@ -215,8 +211,7 @@ def load_infinite_qa(data_path: str) -> Dict[str, Dict[str, Any]]:
 
 def load_dataset(dataset_name: str, data_path: str) -> Dict[str, Dict[str, Any]]:
     """
-    Unified dataset loader.
-    List of book dictionaries with unified format
+    A simple wrapper that calls the correct loading function based on the dataset name string.
     """
     if dataset_name == "NovelQA":
         return load_novelqa(data_path)
@@ -226,5 +221,3 @@ def load_dataset(dataset_name: str, data_path: str) -> Dict[str, Dict[str, Any]]
         return load_infinite_qa(data_path)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}. Use 'NovelQA', 'InfiniteChoice', or 'InfiniteQA'")
-
-

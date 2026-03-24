@@ -1,14 +1,14 @@
 """
-summary_tree.py - Minimal RAPTOR-style summary tree
+This file builds our hierarchical summary tree, similar to the RAPTOR paper.
 
-Core algorithm:
-1. Global UMAP + GMM clustering
-2. Local UMAP + GMM within each global cluster  
-3. Summarize clusters → embed → repeat until few nodes left
+Here is how it works:
+1. We cluster everything globally using UMAP and Gaussian Mixture Models (GMM).
+2. We then take each large cluster and break it down further into smaller local clusters.
+3. We summarize those clusters, get their embeddings, and repeat the whole process until we have a single root node.
 
-Two-prompt approach:
-- Level 1 (summarizing raw chunks): LEAF_PROMPT (extractive)
-- Level 2+ (summarizing summaries): SUMMARY_PROMPT (synthetic)
+We use two different prompts:
+- For the first layer (Level 1), our prompt extracts concrete facts from the raw text chunks.
+- For higher layers (Level 2 and above), our prompt synthesizes summaries of summaries to capture the broader picture.
 """
 
 import os
@@ -43,19 +43,14 @@ COMBINED SUMMARY:"""
 
 def create_summarizer(llm_fn):
     """
-    Create a two-prompt summarizer function.
-    
-    Args:
-        llm_fn: Function that takes (prompt: str) -> str
-    
-    Returns:
-        summarizer function: (texts: List[str], level: int) -> str
+    Sets up a summarization function that knows which prompt to use based on how high up the tree we are.
+    It takes in your LLM generation function and returns a new function that accepts a list of texts and their current tree level.
     """
     def summarizer(texts, level):
         combined = "\n\n---\n\n".join(texts)
         
-        # Level 1 = summarizing raw chunks → extractive (LEAF_PROMPT)
-        # Level 2+ = summarizing summaries → synthetic (SUMMARY_PROMPT)
+        # If we are at the bottom of the tree, we use the detailed extraction prompt.
+        # Otherwise, we use the synthesis prompt for combining existing summaries.
         if level == 1:
             prompt = LEAF_PROMPT.format(text=combined)
         else:
@@ -66,10 +61,10 @@ def create_summarizer(llm_fn):
     return summarizer
 
 
-# ============ CLUSTERING (unchanged) ============
+# ============ CLUSTERING LOGIC ============
 
 def get_optimal_k(embeddings, max_k=50):
-    """Find optimal cluster count using BIC."""
+    """Figures out the best number of clusters to use by checking the Bayesian Information Criterion (BIC) score."""
     max_k = min(max_k, max(1, len(embeddings) // 2))
     
     if max_k <= 1:
@@ -82,7 +77,7 @@ def get_optimal_k(embeddings, max_k=50):
             gm.fit(embeddings)
             bics.append(gm.bic(embeddings))
         except (ValueError, np.linalg.LinAlgError):
-            # If fitting fails for k, we stop trying higher k
+            # Sometimes when there's not enough data, the GMM fails to fit, so we just stop looking for more clusters.
             break
     
     if not bics:
@@ -92,7 +87,7 @@ def get_optimal_k(embeddings, max_k=50):
 
 
 def gmm_cluster(embeddings, threshold=0.1):
-    """Soft GMM clustering. Returns list of cluster indices per node."""
+    """Runs soft clustering. Soft clustering means one node might belong to multiple clusters if it sits right on the boundary."""
     if len(embeddings) <= 1:
         return [[0]], 1
     
@@ -101,12 +96,12 @@ def gmm_cluster(embeddings, threshold=0.1):
         gm = GaussianMixture(n_components=k, random_state=42, reg_covar=1e-5)
         gm.fit(embeddings)
     except Exception:
-        # Fallback to single cluster if GMM fails even with optimal k
+        # If the clustering completely breaks down, we just lump everything into one big cluster to stay safe.
         return [[0] for _ in embeddings], 1
         
     probs = gm.predict_proba(embeddings)
     
-    # Soft assignment: node in cluster if prob > threshold
+    # Assign the node to any cluster where its probability beats our threshold.
     labels = []
     for prob in probs:
         clusters = np.where(prob > threshold)[0].tolist()
@@ -118,18 +113,17 @@ def gmm_cluster(embeddings, threshold=0.1):
 
 
 def cluster_nodes(embeddings, dim=10, threshold=0.1):
-    """Two-stage clustering with dynamic UMAP parameters (RAPTOR-style)."""
+    """The main RAPTOR clustering logic. It does a global clustering pass first, and then refines things locally."""
     n = len(embeddings)
     if n <= 1:
         return [[0]] * n
     
-    # RAPTOR Logic: For small N, use random init to avoid spectral instability
-    # and ensure neighbors/components constraints are met.
+    # When we only have a few nodes, spectral initialization can crash, so we just use random initialization.
     init_mode = "spectral"
     if n < 15:
         init_mode = "random"
     
-    # Global UMAP
+    # First, let's look at the big picture and cluster globally.
     global_dim = min(dim, max(1, n - 2))
     global_neighbors = max(2, int(np.sqrt(n)))
     
@@ -137,13 +131,13 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
         n_neighbors=min(global_neighbors, n-1),
         n_components=global_dim,
         metric="cosine",
-        init=init_mode,  # Stability fix
+        init=init_mode,  # This fixes the crashes when n is small
         random_state=42
     ).fit_transform(embeddings)
     
     global_labels, n_global = gmm_cluster(reduced_global, threshold)
     
-    # Local clustering
+    # Now we zoom into each big cluster and break them down into smaller, tighter groups.
     final_labels = [[] for _ in range(n)]
     total_clusters = 0
     
@@ -154,8 +148,7 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
         
         cluster_size = len(indices)
         
-        # Local UMAP + GMM
-        # Use simple clustering for small local clusters
+        # If the cluster is already super small, we don't need to break it down any further.
         if cluster_size <= dim + 1:
             for i in indices:
                 final_labels[i].append(total_clusters)
@@ -186,26 +179,18 @@ def cluster_nodes(embeddings, dim=10, threshold=0.1):
     return final_labels
 
 
-# ============ TREE BUILDING ============
+# ============ TREE BUILDING LOGIC ============
 
 def build_tree(chunks, embedder, summarizer, min_nodes=5):
     """
-    Build summary tree from chunks.
-    
-    Args:
-        chunks: List of {"chunk_id": str, "text": str}
-        embedder: func(List[str]) -> np.ndarray
-        summarizer: func(List[str], level: int) -> str  # <-- NOW TAKES LEVEL
-        min_nodes: Stop when fewer nodes than this
-    
-    Returns:
-        nodes: dict[node_id] -> {text, embedding, children, leaves}
-        levels: dict[level] -> list of node_ids
+    Constructs the entire hierarchical tree starting from the bottom leaf chunks and working its way up.
+    We stop building parents when we have fewer than `min_nodes` left at the top.
+    Returns the organized nodes and the layer structure.
     """
     nodes = {}
     levels = {}
     
-    # Level 0: leaf nodes (original chunks, no summarization)
+    # At Level 0, we just have the raw text chunks exactly as they came in.
     texts = [c["text"] for c in chunks]
     embeddings = embedder(texts)
     
@@ -224,22 +209,22 @@ def build_tree(chunks, embedder, summarizer, min_nodes=5):
     levels[0] = current
     level = 0
     
-    # Build higher levels
+    # Keep clustering and summarizing until we reach the top of the tree.
     while len(current) > min_nodes:
         level += 1
         print(f"  Building Level {level} from {len(current)} nodes...")
         
-        # Log which prompt will be used
+        # Print out some helpful info so we can see what's happening.
         prompt_type = "LEAF_PROMPT (extractive)" if level == 1 else "SUMMARY_PROMPT (synthetic)"
         print(f"    > Using {prompt_type}")
         
         embs = np.array([nodes[nid]["embedding"] for nid in current])
         
-        # Cluster
+        # Group the nodes at this level into clusters.
         print("    > Clustering nodes (UMAP + GMM)...")
         cluster_labels = cluster_nodes(embs)
         
-        # Group by cluster
+        # Organize the IDs so we can work with each cluster directly.
         clusters = {}
         for nid, labels in zip(current, cluster_labels):
             for c in labels:
@@ -249,23 +234,23 @@ def build_tree(chunks, embedder, summarizer, min_nodes=5):
         
         print(f"    > Found {len(clusters)} clusters. Generating summaries...")
         
-        # SAFETY CHECK: If no meaningful reduction, stop early to avoid infinite loops
+        # Sometimes the clustering algorithm fails to compress the data. If that happens, we need to break out so we don't get stuck in an endless loop.
         if len(clusters) >= len(current):
             print(f"    ! Warning: No reduction ({len(clusters)} clusters from {len(current)} nodes). Stopping early.")
             break
 
-        # Create parent nodes
+        # Now we summarize each cluster to create the next layer of parent nodes.
         parents = []
         sorted_clusters = sorted(clusters.keys())
         for c in tqdm(sorted_clusters, desc=f"    > Summarizing Level {level}", unit="cluster"):
             children = clusters[c]
             child_texts = [nodes[nid]["text"] for nid in children]
             
-            # Summarize with level info (CHANGED: pass level to summarizer)
+            # Pass the level index to the summarizer so it knows which prompt to use.
             summary = summarizer(child_texts, level)
             emb = embedder([summary])[0]
             
-            # Collect all leaves
+            # A parent needs to know every single raw leaf chunk it sits above, so we pass those up the chain.
             leaves = []
             for nid in children:
                 leaves.extend(nodes[nid]["leaves"])
@@ -275,12 +260,12 @@ def build_tree(chunks, embedder, summarizer, min_nodes=5):
                 "text": summary,
                 "embedding": emb,
                 "children": children,
-                "parents": [],  # <--- Added
+                "parents": [],  # This is empty for now, but will be filled by whoever becomes the parent of this node
                 "leaves": list(set(leaves))
             }
             parents.append(parent_id)
             
-            # Back-link: Tell children who their parent is
+            # It's important that children know who their parent is, so we establish the relationship here.
             for child_id in children:
                 nodes[child_id]["parents"].append(parent_id)
         
@@ -291,14 +276,14 @@ def build_tree(chunks, embedder, summarizer, min_nodes=5):
     return nodes, levels
 
 
-#  SAVE / LOAD 
+#  SAVE AND LOAD UTILS
 
 def save_tree(nodes, levels, cache_dir):
-    """Save tree to disk."""
+    """Saves the fully built tree and all its embeddings to your cache folder."""
     tree_dir = os.path.join(cache_dir, "summary_tree")
     os.makedirs(tree_dir, exist_ok=True)
     
-    # Save structure (without embeddings)
+    # Split the embeddings out from the text so the JSON files don't become massive.
     structure = {nid: {k: v for k, v in n.items() if k != "embedding"} 
                  for nid, n in nodes.items()}
     with open(os.path.join(tree_dir, "nodes.json"), "w") as f:
@@ -307,13 +292,13 @@ def save_tree(nodes, levels, cache_dir):
     with open(os.path.join(tree_dir, "levels.json"), "w") as f:
         json.dump({str(k): v for k, v in levels.items()}, f, indent=2)
     
-    # Save embeddings
+    # Save the heavy numpy embeddings in a separate compressed file.
     embs = {nid: n["embedding"] for nid, n in nodes.items()}
     np.savez(os.path.join(tree_dir, "embeddings.npz"), **embs)
 
 
 def load_tree(cache_dir):
-    """Load tree from disk."""
+    """Reads the previously saved tree back into memory, re-attaching the embeddings."""
     tree_dir = os.path.join(cache_dir, "summary_tree")
     
     with open(os.path.join(tree_dir, "nodes.json")) as f:

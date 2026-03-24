@@ -1,16 +1,13 @@
-"""
-A handy utility script that reads through all the saved predictions on disk
-and generates a neat performance report (including Accuracy, F1 Scores, Rouge-L, and Speeds).
-"""
+"""Reads saved predictions and prints accuracy, F1, Rouge-L, and timing stats."""
 
 import os
 import json
 from rouge import Rouge
 from sklearn.metrics import confusion_matrix, classification_report, f1_score
 
-DATASET_NAME    = "InfiniteQA"      
+DATASET_NAME    = "InfiniteChoice"      # or "InfiniteQA"
 CACHE_ROOT      = "./cache"
-PREDICTION_FILE = "predictions.json" 
+PREDICTION_FILE = "predictions_C2.json" # "predictions.json" for C1, "predictions_C2.json" for C2
 
 CHOICE_LABELS = ["A", "B", "C", "D"]
 
@@ -29,12 +26,12 @@ def rouge_l(pred, gold):
         return 0.0
     try:
         return round(Rouge().get_scores(pred, gold)[0]["rouge-l"]["f"], 4)
-    except:
+    except Exception:
         return 0.0
 
 
 def load_predictions(cache_root, dataset_name, pred_file):
-    """Scans through all our cached book folders and gathers everyone's predictions into one giant list."""
+    """Walk cache folder and return all prediction records as a flat list."""
     records = []
     base = os.path.join(cache_root, dataset_name)
     for root, _, files in os.walk(base):
@@ -62,7 +59,7 @@ def calculate_rouge(records):
 
 
 def calculate_classification_metrics(records):
-    """Calculates the detailed breakdown of how well the model did, including precision, recall, and a confusion matrix."""
+    """Confusion matrix, per-class P/R/F1, and macro F1 for multiple-choice."""
     y_true, y_pred, skipped = [], [], 0
     for r in records:
         gt = clean(r.get("ground_truth", ""))
@@ -86,7 +83,7 @@ def calculate_classification_metrics(records):
 
 
 def calculate_timing(cache_root, dataset_name, pred_file):
-    """Hunts down all the little text files we saved during the pipeline to calculate our exact performance speeds."""
+    """Collect tree build times, total indexing times, graph build times, eval times, and per-question retrieval times."""
     base = os.path.join(cache_root, dataset_name)
     tree_times, total_index_times, graph_times, eval_times, retrieval_times = [], [], [], [], []
 
@@ -108,7 +105,7 @@ def calculate_timing(cache_root, dataset_name, pred_file):
             if os.path.exists(fp):
                 try:
                     lst.append(float(open(fp).read().strip()))
-                except:
+                except Exception:
                     pass
 
         pp = os.path.join(bp, pred_file)
@@ -118,7 +115,7 @@ def calculate_timing(cache_root, dataset_name, pred_file):
                     t = qa.get("retrieval_time")
                     if t is not None:
                         retrieval_times.append(float(t))
-            except:
+            except Exception:
                 pass
 
     return tree_times, total_index_times, graph_times, eval_times, retrieval_times

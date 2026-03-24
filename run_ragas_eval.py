@@ -17,7 +17,7 @@ from ragas.metrics import (
     context_precision,
     answer_correctness,
 )
-from ragas.metrics import NoiseSensitivity
+
 from datasets import Dataset
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas.run_config import RunConfig
@@ -137,7 +137,6 @@ def evaluate_book_ragas(book_id):
         context_recall,
         context_precision,
         answer_correctness,
-        NoiseSensitivity(),
     ]
 
     run_config = RunConfig(timeout=600, max_workers=1, max_wait=300)
@@ -174,7 +173,6 @@ def evaluate_book_ragas(book_id):
     Context Recall:      {df['context_recall'].mean():.4f}
     Context Precision:   {df['context_precision'].mean():.4f}
     Answer Correctness:  {df['answer_correctness'].mean():.4f}
-    Noise Sensitivity:   {df['noise_sensitivity'].mean():.4f}
     """
     print(summary)
 

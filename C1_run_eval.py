@@ -1,16 +1,16 @@
 """
-This script puts our Baseline C1 retriever to the test. 
-It loops through all the questions in our dataset, asks the retriever to find the relevant chunks 
-from the graph or FAISS, feeds those chunks into the LLM, and then saves the final answers to a JSON file.
+Evaluates the C1 (baseline) retrieval pipeline. For each book, retrieves
+evidence for every question, generates an answer with the LLM,
+and saves predictions to a JSON file.
 """
 
+import os
+import re
 import json
+import time
 import logging
 import numpy as np
 from dotenv import load_dotenv
-import os
-import re
-import time
 
 from C1_retrieval import load_retriever_from_cache
 from dataloader import load_dataset
@@ -21,22 +21,22 @@ logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
-# Main evaluation settings
+# Main settings
 DATASET_NAME = "InfiniteChoice"
 DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl")
 
-RUN_MODE = "range"       # "single", "range", or "all"
-BOOK_ID_TO_EVAL = "0"    # for single mode
-RANGE_START = 0           # for range mode
-RANGE_END = 25
-TOTAL_BOOKS = 58          # for all mode
+RUN_MODE = "all"          # "single", "range", or "all"
+BOOK_ID_TO_EVAL = "0"     # for single mode
+RANGE_START = 0            # for range mode
+RANGE_END = 51
+TOTAL_BOOKS = 69           # for all mode
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
 
 # Options: "qwen", "gpt", "lmstudio"
-LLM_MODEL_NAME = "qwen"
+LLM_MODEL_NAME = "lmstudio"
 
 MAX_CHUNKS = 25
 SHORTEST_PATH_K = 4
@@ -48,32 +48,31 @@ def embed_wrapper(text):
 
 def extract_answer(llm_output):
     """
-    Extracts the correct A, B, C, or D answer from the LLM's output using Regex.
+    Extracts the correct A, B, C, or D answer from the LLM's output using regex.
     Falls back to "Z" (incorrect) if no valid letter is found.
     """
     cleaned = llm_output.strip().upper()
 
-    # First priority: The LLM followed instructions and just gave us a single letter, maybe with a period.
-    match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\s*$|[.:\)]\s*$|[.:\)]\s+)", cleaned)
+    # First check: clean single letter at the start
+    match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\.|:|\)|$|\s)", cleaned)
     if match:
         return match.group(1)
 
-    # Second priority: The LLM was a bit chatty but explicitly stated "The answer is C".
-    match = re.search(r"(?:ANSWER\s*(?:IS\s*)?[:\-]?\s*|THE\s+ANSWER\s+IS\s+)([A-D])\b", cleaned)
+    # Second check: explicit "Answer: B" pattern
+    match = re.search(r"ANSWER\s*:\s*([A-D])", cleaned)
     if match:
         return match.group(1)
 
-    # Third priority: The LLM wrote a whole essay. Often the final conclusion is at the very end, so we grab the last standalone letter.
-    all_matches = re.findall(r"\b([A-D])\b", cleaned)
-    if all_matches:
-        return all_matches[-1]
+    # Third check: any standalone A-D letter
+    match = re.search(r"\b([A-D])\b", cleaned)
+    if match:
+        return match.group(1)
 
     return "Z"
 
 
-
 def evaluate_book(raw_book_id, dataset):
-    """Runs the full retrieval and LLM generation pipeline for a single book."""
+    """Runs the full C1 retrieval and generation pipeline for a single book."""
     book_id_label = f"{DATASET_NAME}_{raw_book_id}"
     cache_dir = os.path.join("cache", DATASET_NAME, raw_book_id)
 
@@ -84,13 +83,10 @@ def evaluate_book(raw_book_id, dataset):
     qa_pairs = dataset[raw_book_id]["qa_pairs"]
     print(f"\n--- Book {raw_book_id} ({len(qa_pairs)} questions) ---")
 
-
-
     if not os.path.exists(cache_dir):
         print(f"  Cache not found: {cache_dir}, skipping.")
         return
 
-    # Boot up the C1 retriever using all our cached graph and vector data
     retriever = load_retriever_from_cache(
         cache_dir=cache_dir,
         book_id=book_id_label,
@@ -110,17 +106,17 @@ def evaluate_book(raw_book_id, dataset):
         q_graph = qa["question"]
         q_dense = qa["question"]
 
-        # Step 1: Let the C1 engine find the best chunks of evidence
+        # Step 1: Retrieve evidence chunks
         print(f"  Q{i}/{len(qa_pairs)-1}: Retrieving...")
         t_start_retrieval = time.time()
-        result = retriever.query(question=q_graph, full_query=q_dense) 
+        result = retriever.query(question=q_graph, full_query=q_dense)
         retrieval_time = time.time() - t_start_retrieval
         evidence_text = result["chunks"]
         rtype = result.get('retrieval_type', '?')
         n_chunks = result.get('len_chunks', 0)
         print(f"  Q{i}/{len(qa_pairs)-1}: {n_chunks} chunks retrieved via [{rtype}] (qtime={retrieval_time:.2f}s)")
 
-        # Step 2: Feed that evidence and the question into the Generator LLM to get a final answer
+        # Step 2: Generate answer with the LLM
         print(f"  Q{i}/{len(qa_pairs)-1}: LLM generating answer...")
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         final_prompt = prompt_template.format(question=qa["question"], evidence=evidence_text)
@@ -131,12 +127,13 @@ def evaluate_book(raw_book_id, dataset):
             print(f"  Q{i}/{len(qa_pairs)-1}: [ERROR] LLM failed: {e}")
             llm_output = "Z"
 
+        # Step 3: Extract the final prediction
         if qa["options"]:
             final_pred = extract_answer(llm_output)
         else:
             final_pred = llm_output.strip()
 
-        # Step 3: Parse out the answer and record exactly how we performed
+        # Log the result
         labels = ["A", "B", "C", "D"]
         gt_idx = labels.index(qa["answer"]) if qa["answer"] in labels else -1
         ground_truth_text = qa["options"][gt_idx] if 0 <= gt_idx < len(qa["options"]) else str(qa["answer"])
@@ -161,7 +158,7 @@ def evaluate_book(raw_book_id, dataset):
             "retrieval_time": retrieval_time,
         })
 
-    # Dump everything to disk so we can analyze the metrics later
+    # Save predictions to disk
     out_file = os.path.join(cache_dir, "predictions.json")
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
@@ -187,7 +184,6 @@ def main():
     else:
         ids = [int(BOOK_ID_TO_EVAL)]
 
-    # Let's get the heavy LLMs into memory early so it doesn't mess up our timing metrics later
     print("\nPre-loading models...")
     preload_models(llm_model=LLM_MODEL_NAME)
     print()

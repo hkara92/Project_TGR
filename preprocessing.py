@@ -1,8 +1,6 @@
 """
-preprocessing.py
-
-Text cleaning and chunking utilities. Supports token-based chunking
-(used in the pipeline) and semantic chunking (experimental).
+Here we handle cleaning up the raw text and splitting it into manageable chunks.
+We can either chunk by exact token counts or use langchain's recursive character splitter.
 """
 
 import re
@@ -13,7 +11,7 @@ import os
 
 
 def clean_text(text):
-    """Normalize unicode and whitespace."""
+    """Cleans up the raw text by normalizing unicode characters and fixing weird spacing."""
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -21,8 +19,8 @@ def clean_text(text):
 
 
 def chunk_by_tokens(text, tokenizer, chunk_size=1000, overlap=100):
-    """Split text into overlapping chunks based on token count."""
-    # tiktoken doesn't accept add_special_tokens
+    """Breaks down the text into smaller chunks using a specific number of tokens. We also add an overlap so we don't cut off important context."""
+    # Note: some tokenizers like tiktoken will throw an error if we pass add_special_tokens
     try:
         token_ids = tokenizer.encode(text, add_special_tokens=False)
     except TypeError:
@@ -54,59 +52,33 @@ def chunk_by_tokens(text, tokenizer, chunk_size=1000, overlap=100):
     return chunks
 
 
-def chunk_by_semantic_iqr(text, nlp, min_sentences=3, max_sentences=20):
-    """Split by semantic similarity breakpoints using IQR."""
-    from llm import get_embeddings
+def chunk_by_recursive(text, chunk_size=4000, overlap=400):
+    """Uses LangChain to recursively split the text by characters. It tries to keep paragraphs and sentences together."""
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+    except ImportError:
+        raise ImportError("Please install langchain-text-splitters (e.g., pip install langchain-text-splitters) to use this method.")
 
-    sentences = [s.text.strip() for s in nlp(text).sents if s.text.strip()]
-
-    if len(sentences) == 0:
-        return []
-
-    if len(sentences) <= min_sentences:
-        return [{"chunk_id": "chunk_0", "text": " ".join(sentences), "order": 0}]
-
-    embeddings = get_embeddings(sentences)
-    embeddings = np.array(embeddings)
-
-    similarities = []
-    for i in range(len(embeddings) - 1):
-        norm_i = np.linalg.norm(embeddings[i])
-        norm_j = np.linalg.norm(embeddings[i + 1])
-        if norm_i > 0 and norm_j > 0:
-            sim = np.dot(embeddings[i], embeddings[i + 1]) / (norm_i * norm_j)
-        else:
-            sim = 0.0
-        similarities.append(sim)
-
-    q1, q3 = np.percentile(similarities, [25, 75])
-    threshold = q1 - 1.5 * (q3 - q1)
-    breakpoint_set = set(i + 1 for i, sim in enumerate(similarities) if sim < threshold)
-
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap,
+    )
+    
+    docs = splitter.create_documents([text])
+    
     chunks = []
-    current_start = 0
-
-    for i in range(1, len(sentences) + 1):
-        chunk_len = i - current_start
-        is_breakpoint = i in breakpoint_set
-        is_end = i == len(sentences)
-
-        should_split = (is_breakpoint and chunk_len >= min_sentences) or (chunk_len >= max_sentences) or is_end
-
-        if should_split and chunk_len > 0:
-            chunk_text = " ".join(sentences[current_start:i])
-            chunks.append({
-                "chunk_id": f"chunk_{len(chunks)}",
-                "text": chunk_text,
-                "order": len(chunks),
-            })
-            current_start = i
-
+    for i, doc in enumerate(docs):
+        chunks.append({
+            "chunk_id": f"chunk_{i}",
+            "text": doc.page_content,
+            "order": i,
+        })
+        
     return chunks
 
 
 def chunk_text(text, method="tokens", **kwargs):
-    """Unified interface for chunking."""
+    """A wrapper function that lets us pick which chunking method we want to use."""
     if method == "tokens":
         return chunk_by_tokens(
             text,
@@ -114,20 +86,18 @@ def chunk_text(text, method="tokens", **kwargs):
             kwargs.get("chunk_size", 1000),
             kwargs.get("overlap", 100),
         )
-    elif method == "semantic_iqr":
-        return chunk_by_semantic_iqr(
+    elif method == "recursive":
+        return chunk_by_recursive(
             text,
-            kwargs["nlp"],
-            kwargs["embedder"],
-            kwargs.get("min_sentences", 3),
-            kwargs.get("max_sentences", 20),
+            kwargs.get("chunk_size", 4000),  # This relies on character count instead of tokens, so it's usually set around 4x higher
+            kwargs.get("overlap", 400),
         )
     else:
-        raise ValueError(f"Unknown method: {method}. Use 'tokens' or 'semantic_iqr'")
+        raise ValueError(f"Unknown method: {method}. Use 'tokens' or 'recursive'")
 
 
 def save_chunks(chunks, cache_dir):
-    """Save chunks to disk."""
+    """Saves our generated chunks into a JSON file for later use."""
     os.makedirs(cache_dir, exist_ok=True)
     with open(os.path.join(cache_dir, "chunks.json"), "w", encoding="utf-8") as f:
         json.dump(chunks, f, indent=2, ensure_ascii=False)

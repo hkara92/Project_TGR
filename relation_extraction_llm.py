@@ -1,8 +1,6 @@
 """
-This script handles the heavy lifting of finding relationships between entities. 
-We pass the text chunks and our extracted entities to an LLM, ask it to find the connections, 
-and then we merge all those connections to build the edges of our graph. 
-Since hitting the LLM takes time and money, everything is heavily cached!
+Extracts entity relationships from text chunks using an LLM, then merges
+duplicate edges. Results are cached per-chunk to avoid redundant LLM calls.
 """
 
 import os
@@ -96,7 +94,7 @@ TITLE_PREFIXES = {"mr", "mrs", "ms", "miss", "dr", "sir", "lady", "lord"}
 
 
 def canonicalize(s):
-    """Cleans up the entity name and strips out common titles like 'Mr.' or 'Dr.' so 'Mr. Darcy' and 'Darcy' match."""
+    """Lowercase, strip whitespace, and remove title prefixes (Mr., Dr., etc.)."""
     if isinstance(s, list):
         s = s[0] if s else ""
     if not isinstance(s, str):
@@ -110,7 +108,7 @@ def canonicalize(s):
 
 
 def canonicalize_relation(s):
-    """A quick little cleanup function to make sure the relation phrases are formatted consistently."""
+    """Normalize relation text to lowercase with single spaces."""
     if isinstance(s, list):
         s = s[0] if s else ""
     if not isinstance(s, str):
@@ -119,7 +117,7 @@ def canonicalize_relation(s):
 
 
 def parse_json_array(text):
-    """Sometimes the LLM wraps its JSON in markdown blocks or adds extra text. This function rips out just the JSON array we need."""
+    """Extracts a JSON array from LLM output, stripping markdown fences if present."""
     text = (text or "").strip()
     if not text:
         return []
@@ -129,7 +127,7 @@ def parse_json_array(text):
 
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
-        print("[WARN] The LLM didn't return a valid JSON array like we asked.")
+        print("[WARN] No valid JSON array found in LLM response.")
         return None
 
     try:
@@ -141,10 +139,7 @@ def parse_json_array(text):
 
 
 def extract_relations_from_chunk(chunk_text, entities, model="gpt", verbose=True):
-    """
-    Sends a single chunk of text and its entities to the LLM to see how they are connected.
-    If something goes completely wrong, it just returns None so we can skip it.
-    """
+    """Sends one chunk + its entities to the LLM and returns validated relations."""
     if len(entities) < 2:
         return []
 
@@ -159,7 +154,7 @@ def extract_relations_from_chunk(chunk_text, entities, model="gpt", verbose=True
 
     raw_relations = parse_json_array(response)
     if raw_relations is None:
-        print("[DEBUG] We couldn't parse the LLM output. Saving exactly what it said to debug_llm_failure.txt so we can investigate later.")
+        print("[DEBUG] Failed to parse LLM output, saving raw response to debug_llm_failure.txt")
         with open("debug_llm_failure.txt", "w", encoding="utf-8") as f:
             f.write(response)
         return None
@@ -202,16 +197,13 @@ def extract_relations_from_chunk(chunk_text, entities, model="gpt", verbose=True
 
 
 def get_cache_path(cache_dir, chunk_id):
-    """Calculates exactly where to save or load the cache file for a specific chunk."""
+    """Returns the file path for caching a chunk's extracted relations."""
     safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", chunk_id)
     return os.path.join(cache_dir, "relations", f"{safe_id}.json")
 
 
 def extract_relations_batch(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"):
-    """
-    Loops through every single text chunk in our dataset and checks for relationships.
-    It's smart about caching, so if we've already processed a chunk in the past, it just loads it from the disk instead of calling the LLM again.
-    """
+    """Extracts relations from all chunks, using cached results where available."""
     relations_dir = os.path.join(cache_dir, "relations")
     os.makedirs(relations_dir, exist_ok=True)
 
@@ -224,7 +216,7 @@ def extract_relations_batch(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"
         chunk_id = f"L0_{chunk['chunk_id']}"
         entities = I_c2e.get(chunk_id, [])
 
-        # We need at least two entities to form a relationship!
+        # Need at least 2 entities to form a relation
         if len(entities) < 2:
             skipped += 1
             continue
@@ -272,10 +264,7 @@ def extract_relations_batch(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"
 
 
 def merge_relations(relations):
-    """
-    If multiple chunks mention that 'Alice loves Bob', we don't want a hundred separate edges. 
-    Instead, we merge them into a single edge and bump up its 'weight' to show how well-supported it is.
-    """
+    """Merges duplicate (source, relation, target) triples into weighted edges."""
     edge_map = {}
 
     for rel in relations:
@@ -302,7 +291,7 @@ def merge_relations(relations):
 
 
 def save_edges(edges, cache_dir):
-    """Dumps all our consolidated graph edges into a final JSON file."""
+    """Saves merged edges to edges.json."""
     filepath = os.path.join(cache_dir, "edges.json")
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(edges, f, indent=2, ensure_ascii=False)
@@ -310,7 +299,7 @@ def save_edges(edges, cache_dir):
 
 
 def load_edges(cache_dir):
-    """Pulls the previously saved edges back into memory."""
+    """Loads edges from edges.json."""
     filepath = os.path.join(cache_dir, "edges.json")
     with open(filepath, "r", encoding="utf-8") as f:
         edges = json.load(f)
@@ -319,7 +308,7 @@ def load_edges(cache_dir):
 
 
 def extract_and_merge_relations(chunks, I_c2e, llm_choice="gpt", cache_dir="./cache"):
-    """The master function that runs the whole relation extraction and merging pipeline from start to finish."""
+    """Runs the full extraction, merging, and saving pipeline."""
     relations = extract_relations_batch(chunks, I_c2e, llm_choice, cache_dir)
     edges = merge_relations(relations)
     save_edges(edges, cache_dir)

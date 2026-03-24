@@ -1,11 +1,16 @@
+"""
+A handy utility script that reads through all the saved predictions on disk
+and generates a neat performance report (including Accuracy, F1 Scores, Rouge-L, and Speeds).
+"""
+
 import os
 import json
 from rouge import Rouge
 from sklearn.metrics import confusion_matrix, classification_report, f1_score
 
-DATASET_NAME    = "InfiniteChoice"      # or "InfiniteQA"
+DATASET_NAME    = "InfiniteQA"      
 CACHE_ROOT      = "./cache"
-PREDICTION_FILE = "predictions_C2.json" # "predictions.json" for C1, "predictions_C2.json" for C2
+PREDICTION_FILE = "predictions.json" 
 
 CHOICE_LABELS = ["A", "B", "C", "D"]
 
@@ -29,7 +34,7 @@ def rouge_l(pred, gold):
 
 
 def load_predictions(cache_root, dataset_name, pred_file):
-    """Walk cache folder and return all prediction records as a flat list."""
+    """Scans through all our cached book folders and gathers everyone's predictions into one giant list."""
     records = []
     base = os.path.join(cache_root, dataset_name)
     for root, _, files in os.walk(base):
@@ -57,7 +62,7 @@ def calculate_rouge(records):
 
 
 def calculate_classification_metrics(records):
-    """Confusion matrix, per-class P/R/F1, and macro F1 for multiple-choice."""
+    """Calculates the detailed breakdown of how well the model did, including precision, recall, and a confusion matrix."""
     y_true, y_pred, skipped = [], [], 0
     for r in records:
         gt = clean(r.get("ground_truth", ""))
@@ -81,19 +86,24 @@ def calculate_classification_metrics(records):
 
 
 def calculate_timing(cache_root, dataset_name, pred_file):
-    """Collect tree build times, eval times, and per-question retrieval times."""
+    """Hunts down all the little text files we saved during the pipeline to calculate our exact performance speeds."""
     base = os.path.join(cache_root, dataset_name)
-    tree_times, eval_times, retrieval_times = [], [], []
+    tree_times, total_index_times, graph_times, eval_times, retrieval_times = [], [], [], [], []
 
     if not os.path.exists(base):
-        return tree_times, eval_times, retrieval_times
+        return tree_times, total_index_times, graph_times, eval_times, retrieval_times
 
     for book_dir in sorted(os.listdir(base)):
         bp = os.path.join(base, book_dir)
         if not os.path.isdir(bp):
             continue
 
-        for fname, lst in [("indexing_time_tree.txt", tree_times), ("eval_time.txt", eval_times)]:
+        for fname, lst in [
+            ("indexing_time_tree.txt", tree_times),
+            ("indexing_time_total.txt", total_index_times),
+            ("graph_build_time.txt", graph_times),
+            ("eval_time.txt", eval_times),
+        ]:
             fp = os.path.join(bp, fname)
             if os.path.exists(fp):
                 try:
@@ -111,7 +121,7 @@ def calculate_timing(cache_root, dataset_name, pred_file):
             except:
                 pass
 
-    return tree_times, eval_times, retrieval_times
+    return tree_times, total_index_times, graph_times, eval_times, retrieval_times
 
 
 if __name__ == "__main__":
@@ -150,15 +160,17 @@ if __name__ == "__main__":
         print(f"  Rouge-L (F1)   : {rl:.4f}")
 
     # Timing
-    tree_times, eval_times, retrieval_times = calculate_timing(CACHE_ROOT, DATASET_NAME, PREDICTION_FILE)
+    tree_times, total_index_times, graph_times, eval_times, retrieval_times = calculate_timing(CACHE_ROOT, DATASET_NAME, PREDICTION_FILE)
     print(f"{sep}")
     print("  TIMING")
     print(sep)
-    for label, vals in [("Tree build  (s/book)    ", tree_times),
-                         ("Eval time   (s/book)    ", eval_times),
-                         ("Retrieval   (s/question)", retrieval_times)]:
+    for label, vals in [("Tree build    (s/book)    ", tree_times),
+                         ("Total index   (s/book)    ", total_index_times),
+                         ("Graph build   (s/book)    ", graph_times),
+                         ("Eval time     (s/book)    ", eval_times),
+                         ("Retrieval     (s/question)", retrieval_times)]:
         if vals:
             print(f"  {label}: avg={sum(vals)/len(vals):.2f}   n={len(vals)}")
-    if not any([tree_times, eval_times, retrieval_times]):
+    if not any([tree_times, total_index_times, graph_times, eval_times, retrieval_times]):
         print("  No timing data found.")
     print(sep)

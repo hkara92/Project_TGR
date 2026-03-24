@@ -122,29 +122,29 @@ python run_ragas_eval.py
 
 ```
 Project_TGR/
-├── run_indexing.py          # Step 2: Offline indexing pipeline
-├── build_graph.py           # Step 4: Neo4j graph loader
-├── C1_retrieval.py          # Baseline retrieval logic
-├── C1_run_eval.py           # Step 5a: Baseline evaluation
-├── C2_retrieval.py          # Region-restricted retrieval (shortest-path)
-├── C2_retrieval_hop.py      # Region-restricted retrieval (hop variant)
-├── C2_run_eval.py           # Step 5b: Region-restricted evaluation
-├── calculate_metrics.py     # Step 6: Metrics aggregation
-├── run_ragas_eval.py        # Step 7: RAGAS evaluation
-├── dataloader.py            # Dataset loading utilities
-├── preprocessing.py         # Text cleaning and chunking
-├── summary_tree.py          # RAPTOR-style tree construction
-├── entity_extraction.py     # SpaCy NER
+├── run_indexing.py             # Offline indexing pipeline
+├── build_graph.py              # Neo4j graph loader
+├── C1_retrieval.py             # Baseline retrieval logic
+├── C1_run_eval.py              # Baseline evaluation
+├── C2_retrieval.py             # Region-restricted retrieval (shortest-path)
+├── C2_retrieval_hop.py         # Region-restricted retrieval (hop variant)
+├── C2_run_eval.py              # Region-restricted evaluation
+├── calculate_metrics.py        # Metrics aggregation
+├── run_ragas_eval.py           # RAGAS evaluation
+├── dataloader.py               # Dataset loading utilities
+├── preprocessing.py            # Text cleaning and chunking
+├── summary_tree.py             # RAPTOR-style tree construction
+├── entity_extraction.py        # SpaCy NER
 ├── relation_extraction_llm.py  # LLM relation extraction
-├── build_indexes.py         # FAISS index builder
-├── llm.py                   # LLM interface (GPT / Qwen / LM Studio)
-├── prompts.py               # Prompt templates
-├── docker-compose.yml       # Neo4j Docker setup
-├── requirements.txt         # Python dependencies
-├── data/                    # Dataset files
-├── cache/                   # Generated artifacts (trees, indexes, predictions)
-├── models/                  # Local model weights (Qwen, BGE)
-└── neo4j_data/              # Neo4j persistent storage
+├── build_indexes.py            # FAISS index builder
+├── llm.py                      # LLM interface (GPT / Qwen / LM Studio)
+├── prompts.py                  # Prompt templates
+├── docker-compose.yml          # Neo4j Docker setup
+├── requirements.txt            # Python dependencies
+├── data/                       # Dataset files
+├── cache/                      # Generated artifacts (trees, indexes, predictions)
+├── models/                     # Local model weights (Qwen, BGE)
+└── neo4j_data/                 # Neo4j persistent storage
 ```
 
 ## Models Used

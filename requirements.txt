@@ -1,4 +1,4 @@
-﻿# core
+# core
 numpy
 python-dotenv
 tqdm
@@ -26,7 +26,11 @@ scikit-learn
 # evaluation
 rouge
 pandas
+rapidfuzz
+
+# ragas evaluation
 ragas
 langchain-openai
+langchain-text-splitters
 datasets
 nest-asyncio

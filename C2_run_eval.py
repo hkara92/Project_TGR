@@ -4,11 +4,10 @@ It loops through the dataset, fetches the best contextual chunks from the graph,
 """
 
 import os
+import re
 import json
 import time
-import re
 import traceback
-import logging
 import importlib
 import numpy as np
 from dotenv import load_dotenv
@@ -35,16 +34,16 @@ print(f"[Config] Using retrieval module: {_module_map[RETRIEVAL_METHOD]}")
 DATASET_NAME = "InfiniteChoice"
 DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl")
 
-RUN_MODE = "range"           # "single", "range", or "all"
-BOOK_IDS = range(0, 20)       # used in range mode
-TARGET_BOOK_ID = 0           # used in single mode
+RUN_MODE = "all"              # "single", "range", or "all"
+BOOK_IDS = range(0, 69)       # used in range mode
+TARGET_BOOK_ID = 0            # used in single mode
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "testpassword"
 
 # Options: "qwen", "gpt", "lmstudio"
-LLM_MODEL_NAME = "qwen"
+LLM_MODEL_NAME = "lmstudio"
 
 
 def get_batch_embeddings(texts):
@@ -116,7 +115,7 @@ def evaluate_book(book_idx, dataset):
     for i, qa in enumerate(qa_list):
         print(f"  Q{i+1}/{len(qa_list)}...", end=" ", flush=True)
 
-        # Step 1: Let the C2 engine find the best chunks of evidence
+        # Retrieve evidence chunks
         t_retrieval = time.time()
         try:
             retrieval_res = retrieve(
@@ -131,17 +130,17 @@ def evaluate_book(book_idx, dataset):
             retrieval_res = {}
         retrieval_time = time.time() - t_retrieval
 
-        # Print a quick report to the console showing exactly what the pipeline did
+        # Print retrieval stats
         s = retrieval_res.get("stats", {})
         print(f"  [Stats] region={s.get('region_chunks','?')} chunks | "
-            f"graph_edges={s.get('relations_found','?')} | "
-            f"after_collection={s.get('candidates_before_mmr','?')} | "
-            f"after_MMR={s.get('candidates_after_mmr','?')} | "
-            f"after_CrossEncoder={s.get('final_chunks','?')} | "
-            f"mode={retrieval_res.get('retrieval_mode','?')} | "
+              f"graph_edges={s.get('relations_found','?')} | "
+              f"after_collection={s.get('candidates_before_mmr','?')} | "
+              f"after_MMR={s.get('candidates_after_mmr','?')} | "
+              f"after_CrossEncoder={s.get('final_chunks','?')} | "
+              f"mode={retrieval_res.get('retrieval_mode','?')} | "
             f"time={retrieval_time:.2f}s")
 
-        # Step 2: Feed that evidence to the Generator LLM
+        # Generate answer with the LLM
         full_q = qa["question"]
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         prompt = prompt_template.format(question=full_q, evidence=context)
@@ -155,7 +154,7 @@ def evaluate_book(book_idx, dataset):
             prediction = llm_response.strip()
             ground_truth_text = qa["answer"]
 
-        # Step 3: Record exactly how we performed
+        # Store the result
         results.append({
             "question_id": i,
             "question": qa["question"],

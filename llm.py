@@ -107,7 +107,7 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
                 trust_remote_code=True,
                 cache_dir=MODELS_DIR,
             )
-            print("[LLM] Qwen3-14B loaded (bfloat16).")
+            print("[LLM] Qwen2.5-7B loaded (bfloat16).")
         
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},

@@ -1,10 +1,6 @@
 """
-This is the main orchestrator script for the entire offline indexing phase. 
-It loads up our dataset, splits the giant texts into manageable chunks, 
-builds the hierarchical RAPTOR summary tree, runs SpaCy to find entities, 
-asks the LLM to figure out the relationships between them, and finally packs 
-everything into high-speed vector search indexes.
-Because this takes a long time, it processes each book one by one and saves the progress to the hard drive so we don't lose our work if it crashes.
+Offline indexing pipeline. Chunks text, builds the RAPTOR summary tree,
+extracts entities and relations, and creates FAISS indexes.
 """
 
 import os

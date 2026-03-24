@@ -1,9 +1,6 @@
 """
-C2_run_eval.py
-
-Evaluates the C2 (graph-based) retrieval pipeline. For each book,
-retrieves context for every question, generates an answer with the
-LLM, and saves predictions to a JSON file.
+This script tests our advanced C2 graph retrieval pipeline. 
+It loops through the dataset, fetches the best contextual chunks from the graph, feeds them to the LLM, and records the predictions.
 """
 
 import os
@@ -20,7 +17,7 @@ from dataloader import load_dataset
 from llm import get_embeddings, call_llm, unload_model
 from prompts import PROMPT_CHOICE, PROMPT_OPEN
 
-# config
+# Main settings
 DATASET_NAME = "InfiniteChoice"
 DATASET_PATH = os.path.join("data", "InfiniteBench", "longbook_choice_eng.jsonl")
 
@@ -37,37 +34,28 @@ LLM_MODEL_NAME = "qwen"
 
 
 def get_batch_embeddings(texts):
-    """Wraps get_embeddings for the retriever."""
+    """A quick helper to format our BGE embeddings correctly for FAISS."""
     return np.array(get_embeddings(texts, model="bge"))
 
 
 def extract_answer(llm_output):
     """
-    Extract A/B/C/D from LLM output.
-
-    Priority order:
-    1. Clean single-letter answer at start: "A", "A.", "A:" with nothing after
-       (what the prompt asks for). Does NOT match "A word..." to avoid treating
-       the article "A" as an answer choice.
-    2. Explicit label: "Answer: B", "The answer is C", "Answer is: D"
-    3. Last standalone letter in the text: if the LLM reasoned verbosely before
-       concluding, the answer letter is almost always at the END, not the start.
-       e.g. "A detailed analysis shows the answer is C" -> last = C (correct)
-    4. Fallback: "Z" (counted as wrong in metrics)
+    Extracts the correct A, B, C, or D answer from the LLM's output using Regex.
+    Falls back to "Z" (incorrect) if no valid letter is found.
     """
     cleaned = llm_output.strip().upper()
 
-    # 1. Pure letter answer at start, optionally with punctuation but nothing else after
+    # First priority: The LLM followed instructions and just gave us a single letter.
     match = re.match(r"^(?:OPTION\s*)?([A-D])(?:\s*$|[.:\)]\s*$|[.:\)]\s+)", cleaned)
     if match:
         return match.group(1)
 
-    # 2. Explicit "Answer: B" or "The answer is C" or "Answer is: D"
+    # Second priority: The LLM was chatty but explicitly stated the answer.
     match = re.search(r"(?:ANSWER\s*(?:IS\s*)?[:\-]?\s*|THE\s+ANSWER\s+IS\s+)([A-D])\b", cleaned)
     if match:
         return match.group(1)
 
-    # 3. Last standalone A-D in the text (handles verbose reasoning then conclusion)
+    # Third priority: The LLM wrote an essay, so grab the final standalone letter at the end.
     all_matches = re.findall(r"\b([A-D])\b", cleaned)
     if all_matches:
         return all_matches[-1]
@@ -76,7 +64,7 @@ def extract_answer(llm_output):
 
 
 def evaluate_book(book_idx, dataset):
-    """Run evaluation for one book."""
+    """Runs the full retrieval and generation pipeline for a single book."""
     book_id_str = str(book_idx)
     book_label = f"{DATASET_NAME}_{book_id_str}"
     cache_dir = os.path.join("cache", DATASET_NAME, book_id_str)
@@ -92,7 +80,7 @@ def evaluate_book(book_idx, dataset):
     output_file = os.path.join(cache_dir, "predictions_C2.json")
     print(f"\nProcessing book {book_idx}...")
 
-    # load retriever resources
+    # Boot up all our cached models and indexes into memory
     try:
         resources = load_retriever(
             cache_dir=cache_dir,
@@ -114,7 +102,7 @@ def evaluate_book(book_idx, dataset):
     for i, qa in enumerate(qa_list):
         print(f"  Q{i+1}/{len(qa_list)}...", end=" ", flush=True)
 
-        # retrieve context
+        # Step 1: Let the C2 engine find the best chunks of evidence
         t_retrieval = time.time()
         try:
             retrieval_res = retrieve(
@@ -129,18 +117,17 @@ def evaluate_book(book_idx, dataset):
             retrieval_res = {}
         retrieval_time = time.time() - t_retrieval
 
-        # print retrieval stage counts
+        # Print a quick report to the console showing exactly what the pipeline did
         s = retrieval_res.get("stats", {})
         print(f"  [Stats] region={s.get('region_chunks','?')} chunks | "
-              f"graph_edges={s.get('relations_found','?')} | "
-              f"after_collection={s.get('candidates_before_mmr','?')} | "
-              f"after_MMR={s.get('candidates_after_mmr','?')} | "
-              f"after_CrossEncoder={s.get('final_chunks','?')} | "
-              f"mode={retrieval_res.get('retrieval_mode','?')} | "
-              f"time={retrieval_time:.2f}s")
+            f"graph_edges={s.get('relations_found','?')} | "
+            f"after_collection={s.get('candidates_before_mmr','?')} | "
+            f"after_MMR={s.get('candidates_after_mmr','?')} | "
+            f"after_CrossEncoder={s.get('final_chunks','?')} | "
+            f"mode={retrieval_res.get('retrieval_mode','?')} | "
+            f"time={retrieval_time:.2f}s")
 
-        # build prompt and generate answer
-        # Select prompt
+        # Step 2: Feed that evidence to the Generator LLM
         full_q = qa["question"]
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         prompt = prompt_template.format(question=full_q, evidence=context)
@@ -154,7 +141,7 @@ def evaluate_book(book_idx, dataset):
             prediction = llm_response.strip()
             ground_truth_text = qa["answer"]
 
-        # store result
+        # Step 3: Record exactly how we performed
         results.append({
             "question_id": i,
             "question": qa["question"],
@@ -169,7 +156,7 @@ def evaluate_book(book_idx, dataset):
         })
         print(f"pred={prediction} gt={qa['answer']}")
 
-    # save
+    # Dump everything to disk so we can analyze the metrics later
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 

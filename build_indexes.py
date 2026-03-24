@@ -1,9 +1,8 @@
 """
-build_indexes.py
-
-Builds FAISS vector index and inverted indexes (summary-entity
-mappings) for each book. Requires the summary tree and entity
-extraction to have been completed first.
+This script takes all the embeddings we generated for our summary tree 
+and packs them into a fast FAISS vector search index. 
+It also builds some look-up dictionaries so we can quickly see which entities belong to which summary nodes without searching the graph every time.
+Note: You must run the summary tree and entity extraction steps before running this!
 """
 
 import os
@@ -13,7 +12,7 @@ import faiss
 
 
 def build_faiss_index(book_cache_dir):
-    """Load tree embeddings and build a FAISS index."""
+    """Loads up all the numpy embeddings we saved earlier and shoves them into a FAISS Inner-Product index for super fast similarity searches."""
     print(f"  Building FAISS index for: {book_cache_dir}")
     tree_dir = os.path.join(book_cache_dir, "summary_tree")
     emb_path = os.path.join(tree_dir, "embeddings.npz")
@@ -22,15 +21,15 @@ def build_faiss_index(book_cache_dir):
         print(f"    No embeddings found at {emb_path}")
         return
 
-    # load embeddings and sort node IDs for a stable ordering
+    # We need to sort the node IDs alphabetically so that the order of our vectors in the index stays consistent.
     data = np.load(emb_path)
     node_ids = sorted(data.files)
     embeddings = np.array([data[nid] for nid in node_ids]).astype("float32")
 
-    # normalize for cosine similarity
+    # We normalize the vectors first. Because we use an Inner Product (FlatIP) FAISS index, normalizing turns the search into Cosine Similarity.
     faiss.normalize_L2(embeddings)
 
-    # build and save
+    # Create the index and give it the correct vector dimensions.
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatIP(dimension)
     index.add(embeddings)
@@ -46,7 +45,11 @@ def build_faiss_index(book_cache_dir):
 
 
 def build_inverted_indexes(book_cache_dir):
-    """Build I_s2e (summary -> entities) and I_e2s (entity -> summaries)."""
+    """
+    Builds two quick-reference dictionaries:
+    One to find all entities mentioned underneath a higher-level summary node.
+    One to find all summary nodes that contain a specific entity somewhere beneath them.
+    """
     print(f"  Building inverted indexes...")
 
     tree_path = os.path.join(book_cache_dir, "summary_tree", "nodes.json")
@@ -65,7 +68,7 @@ def build_inverted_indexes(book_cache_dir):
     with open(entities_path, "r", encoding="utf-8") as f:
         I_c2e = json.load(f)
 
-    # for each tree node, collect all entities from its leaf chunks
+    # We walk through every parent node in the tree and gather up every single entity mentioned by any leaf chunk underneath it.
     I_s2e = {}
     for node_id, node_data in tree_nodes.items():
         leaf_chunks = node_data.get("leaves", [])
@@ -80,7 +83,7 @@ def build_inverted_indexes(book_cache_dir):
                 entities.add(entity)
         I_s2e[node_id] = list(entities)
 
-    # reverse the mapping
+    # Now we just flip that dictionary around so we can search it the other way.
     I_e2s = {}
     for node_id, entities in I_s2e.items():
         for entity in entities:
@@ -102,13 +105,13 @@ def build_inverted_indexes(book_cache_dir):
 
 
 def extract_all_indexes(book_cache_dir):
-    """Run both indexing steps for one book."""
+    """A simple helper to run both the FAISS vector indexing and the dictionary mapping in one go."""
     build_faiss_index(book_cache_dir)
     build_inverted_indexes(book_cache_dir)
 
 
 def main():
-    """Standalone: build indexes for all books in the cache."""
+    """If you run this script directly, it will loop through the cache and build the indexes for every book it finds."""
     base_dir = os.path.abspath("./cache/InfiniteChoice")
 
     if not os.path.exists(base_dir):

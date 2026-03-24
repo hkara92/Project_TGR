@@ -1,10 +1,10 @@
 """
-run_indexing.py
-
-Indexing pipeline: loads the dataset, chunks the text, builds a
-summary tree, extracts entities and relations, and creates FAISS
-indexes. Each book is processed independently with results cached
-to disk.
+This is the main orchestrator script for the entire offline indexing phase. 
+It loads up our dataset, splits the giant texts into manageable chunks, 
+builds the hierarchical RAPTOR summary tree, runs SpaCy to find entities, 
+asks the LLM to figure out the relationships between them, and finally packs 
+everything into high-speed vector search indexes.
+Because this takes a long time, it processes each book one by one and saves the progress to the hard drive so we don't lose our work if it crashes.
 """
 
 import os
@@ -16,7 +16,8 @@ import numpy as np
 import functools
 from transformers import AutoTokenizer
 
-# suppress noisy logs
+# Hide all the annoying warning messages from PyTorch and HuggingFace so our console stays clean.
+os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = "0"
 os.environ["LOKY_MAX_CPU_COUNT"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -34,19 +35,25 @@ from llm import call_llm, get_tokenizer, get_embeddings, reset_token_usage, get_
 from relation_extraction_llm import extract_and_merge_relations
 from build_indexes import extract_all_indexes
 
-# config
-LLM_CHOICE = "qwen"
-EMBEDDER_MODEL = "bge" if LLM_CHOICE == "qwen" else "text-embedding-3-large"
-DATASET_NAME = "InfiniteQA"
-DATASET_PATH = "./data/InfiniteBench/longbook_qa_eng.jsonl"
+# Our main configuration variables. Change these if you want to swap datasets or models.
+LLM_CHOICE = "lmstudio"
+EMBEDDER_MODEL = "bge"
+DATASET_NAME = "InfiniteChoice"
+DATASET_PATH = "./data/InfiniteBench/longbook_choice_eng.jsonl"
 CACHE_DIR = "./cache"
 
-CHUNK_SIZE = 1200
-OVERLAP = 100
-CHUNKING_METHOD = "tokens"
+# Settings for splitting text based on character counts
+CHUNK_SIZE = 4800  
+OVERLAP = 300     
+CHUNKING_METHOD = "recursive"
+
+# Alternative settings if we want to split by exact token counts instead
+# CHUNK_SIZE = 1200
+# OVERLAP = 100
+# CHUNKING_METHOD = "tokens"
 
 
-# simple wrapper so the embedder can be passed around like an object
+# A tiny helper class that lets us pass the embedding function around more easily
 class EmbedderWrapper:
     def __init__(self, model_name):
         self.model_name = model_name
@@ -55,10 +62,10 @@ class EmbedderWrapper:
         return np.array(get_embeddings(texts, model=self.model_name))
 
 
-# init
+# Booting up the heavy machinery...
 print("\nSetting up models...")
 embedder = EmbedderWrapper(EMBEDDER_MODEL)
-tokenizer = get_tokenizer(LLM_CHOICE)
+tokenizer = get_tokenizer("gpt")
 nlp = load_spacy("en_core_web_lg")
 
 dataset = load_dataset(DATASET_NAME, DATASET_PATH)
@@ -66,7 +73,9 @@ book_ids = list(dataset.keys())
 print(f"Models loaded. Found {len(book_ids)} books.")
 
 
-# process each book
+build_times = []
+
+# Time to loop through the dataset, processing one book at a time.
 for i, book_id in enumerate(book_ids):
     print(f"\n--- Book {i+1}/{len(book_ids)} [ID: {book_id}] ---\n")
     start_time = time.time()
@@ -79,13 +88,13 @@ for i, book_id in enumerate(book_ids):
     chunks_file = os.path.join(book_cache_dir, "chunks.json")
     chunks = []
 
-    # skip if the tree was already built
+    # Check our cache folder. If the tree is already built, just load it up instead of doing the heavy lifting again.
     if os.path.exists(tree_file) and os.path.exists(chunks_file):
         print("Tree already exists, skipping.")
         with open(chunks_file, "r", encoding="utf-8") as f:
             chunks = json.load(f)
     else:
-        # load or create chunks
+        # Try to load the basic text chunks from the cache, or make them if they don't exist yet.
         if os.path.exists(chunks_file):
             print("Loading chunks from cache...")
             with open(chunks_file, "r", encoding="utf-8") as f:
@@ -104,7 +113,7 @@ for i, book_id in enumerate(book_ids):
             save_chunks(chunks, book_cache_dir)
             print(f"  Saved {len(chunks)} chunks.")
 
-        # build the summary tree
+        # Now we construct the hierarchical summary tree from those chunks.
         print("Building summary tree...")
         reset_token_usage()
         summarizer_fn = create_summarizer(lambda prompt: call_llm(prompt, model=LLM_CHOICE))
@@ -119,7 +128,7 @@ for i, book_id in enumerate(book_ids):
             f.write(f"{duration_tree:.4f}")
         print(f"  Tree done ({len(nodes)} nodes) in {duration_tree:.2f}s")
 
-    # extract entities with spacy
+    # Run the lightweight SpaCy model over the text to pull out all the named entities.
     print("Extracting entities...")
     entities_file = os.path.join(book_cache_dir, "entities", "I_e2c.json")
 
@@ -133,7 +142,7 @@ for i, book_id in enumerate(book_ids):
         save_entities(I_e2c, I_c2e, book_cache_dir)
         print(f"  Found {len(I_e2c)} entities in {time.time()-start_ent:.2f}s")
 
-    # build FAISS and inverted indexes
+    # Convert all our text and embeddings into the highly-optimized FAISS vector search database.
     faiss_file = os.path.join(book_cache_dir, "summary_tree", "tree.index")
     if os.path.exists(faiss_file):
         print("  FAISS index already exists, skipping.")
@@ -144,7 +153,7 @@ for i, book_id in enumerate(book_ids):
         except Exception as e:
             print(f"  Index build failed: {e}")
 
-    # extract relations using the LLM
+    # This is the most expensive and time-consuming step: asking the LLM to map out the relationships between our extracted entities.
     edges_file = os.path.join(book_cache_dir, "edges.json")
     if os.path.exists(edges_file):
         print("  Relations already extracted, skipping.")
@@ -154,10 +163,18 @@ for i, book_id in enumerate(book_ids):
         extract_and_merge_relations(chunks, I_c2e, llm_choice=LLM_CHOICE, cache_dir=book_cache_dir)
         print(f"  Relations done ({time.time()-start_rel:.2f}s).")
 
-    print(f"Book {book_id} complete!")
+    # Keep track of how long this specific book took to process so we can measure our pipeline's performance.
+    book_build_time = time.time() - start_time
+    build_times.append(book_build_time)
+    with open(os.path.join(book_cache_dir, "indexing_time_total.txt"), "w") as f:
+        f.write(f"{book_build_time:.4f}")
+    print(f"Book {book_id} complete! (total build time: {book_build_time:.2f}s)")
 
-    # free GPU memory between books
-    if LLM_CHOICE == "qwen":
-        unload_model()
+    # Clear out the VRAM so the next book has a fresh slate.
+    unload_model()
 
+# Print out the final speed and performance metrics.
 print("\nAll books indexed!")
+print(f"Total books: {len(build_times)}")
+print(f"Average build time per book: {sum(build_times)/len(build_times):.2f}s")
+print(f"Total build time: {sum(build_times):.2f}s")

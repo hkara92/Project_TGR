@@ -1,8 +1,6 @@
 """
-prompts.py
-
-Centralized store for LLM prompts used in evaluation scripts.
-Separates Multiple Choice (InfiniteChoice) from Open-Ended QA (InfiniteQA) logic.
+A simple storage file for our exact LLM prompts. 
+Separates the strict Multiple Choice rules (InfiniteChoice) from the Open-Ended QA rules (InfiniteQA/NovelQA).
 """
 
 PROMPT_CHOICE = """You are a helpful assistant. Use ONLY the evidence below to answer the question.

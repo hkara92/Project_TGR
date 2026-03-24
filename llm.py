@@ -1,9 +1,7 @@
 """
-llm.py
-
-Handles LLM calls (GPT-5 or Qwen3-14B) and embedding generation
-(OpenAI or BAAI BGE). Models are cached after first load and freed
-with unload_model().
+A central hub for talking to our AI models.
+It handles all text generation (via local Qwen or LM Studio) and vector embeddings (via BGE), 
+keeping them in memory only when necessary to save GPU VRAM.
 """
 
 import os
@@ -13,15 +11,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-QWEN_MODEL_NAME = "./models/Qwen3-14B"
-BGE_MODEL_NAME = "BAAI/bge-large-en-v1.5"
+QWEN_MODEL_NAME = "./models/Qwen2.5-7B-Instruct"
+BGE_MODEL_NAME = "BAAI/bge-m3"
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# token tracking for OpenAI billing
+# Track token usage so we can monitor API costs (if using OpenAI)
 INPUT_TOKENS = 0
 OUTPUT_TOKENS = 0
 
-# cached models
+# Keeping models in memory so we don't have to load them from disk every time
 _qwen_model = None
 _qwen_tokenizer = None
 _bge_embedder = None
@@ -38,7 +36,7 @@ def get_token_usage():
 
 
 def get_tokenizer(model="gpt"):
-    """Return a tokenizer for text chunking."""
+    """Grabs the correct tokenizer so we can accurately count how big our text chunks are."""
     if model == "gpt":
         import tiktoken
         return tiktoken.encoding_for_model("gpt-5-mini")
@@ -53,7 +51,7 @@ def get_tokenizer(model="gpt"):
 
 
 def unload_model():
-    """Remove the LLM from memory and free GPU."""
+    """Wipes the heavy local LLMs out of VRAM so the next script has a fresh GPU to work with."""
     global _qwen_model, _qwen_tokenizer
     
     if _qwen_model is None:
@@ -68,7 +66,7 @@ def unload_model():
 
 
 def call_llm(prompt, model="gpt", max_tokens=4096):
-    """Send a prompt and get a text response."""
+    """Sends a prompt to either our local instance or an external API and returns the generated text."""
     if model == "gpt":
         global INPUT_TOKENS, OUTPUT_TOKENS
         from openai import OpenAI
@@ -93,7 +91,6 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
     if model == "qwen":
         global _qwen_model, _qwen_tokenizer
         
-        # load on first call
         if _qwen_model is None:
             print(f"[LLM] Loading {QWEN_MODEL_NAME}...")
             os.makedirs(MODELS_DIR, exist_ok=True)
@@ -137,20 +134,19 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
         return response.strip()
 
     if model == "lmstudio":
-        # LM Studio exposes an OpenAI-compatible API at localhost:1234
+        # Forward the request to our local LM Studio server running in the background
         from openai import OpenAI
         
-        # Point to local server
         client = OpenAI(base_url="http://localhost:1234/v1", api_key="lm-studio")
         
         try:
             resp = client.chat.completions.create(
-                model="local-model",  # The specific name doesn't matter for LM Studio
+                model="local-model",
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1, # Low temp for factual QA
+                temperature=0.1, 
                 max_tokens=max_tokens,
             )
             return (resp.choices[0].message.content or "").strip()
@@ -162,7 +158,7 @@ def call_llm(prompt, model="gpt", max_tokens=4096):
 
 
 def get_embeddings(texts, model="text-embedding-3-large"):
-    """Return a list of embedding vectors."""
+    """Converts raw text into mathematical vectors using our chosen embedding model."""
     if isinstance(texts, str):
         texts = [texts]
     if not texts:
@@ -171,7 +167,6 @@ def get_embeddings(texts, model="text-embedding-3-large"):
     if model == "bge":
         global _bge_embedder
         
-        # load on first call
         if _bge_embedder is None:
             print(f"[EMB] Loading {BGE_MODEL_NAME}...")
             from sentence_transformers import SentenceTransformer
@@ -180,7 +175,6 @@ def get_embeddings(texts, model="text-embedding-3-large"):
         
         return _bge_embedder.encode(texts, show_progress_bar=False).tolist()
     
-    # openai path
     from openai import OpenAI
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     all_embeddings = []
@@ -194,12 +188,12 @@ def get_embeddings(texts, model="text-embedding-3-large"):
 
 
 def get_embedding_dim(model="text-embedding-3-large"):
-    """Return the vector size for the chosen embedding model."""
+    """Returns the exact dimension size of our vectors so we can initialize the FAISS databases correctly."""
     return 1024 if model == "bge" else 3072
 
 
 def preload_models(llm_model="qwen"):
-    """Pre-load BGE embedder and optionally the Qwen LLM."""
+    """Forces the models to load into memory right away instead of waiting for the first actual query."""
     get_embeddings(["warmup"], model="bge")
     if llm_model == "qwen":
         call_llm("warmup", model="qwen", max_tokens=1)

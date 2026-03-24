@@ -13,8 +13,7 @@ import json
 import logging
 import warnings
 import numpy as np
-import functools
-from transformers import AutoTokenizer
+
 
 # Hide all the annoying warning messages from PyTorch and HuggingFace so our console stays clean.
 os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = "0"

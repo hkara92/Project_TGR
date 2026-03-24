@@ -1,114 +1,166 @@
 # Project TGR: Tree-Graph RAG
 
-This project implements a Knowledge Graph-enhanced Retrieval Augmented Generation (KG-RAG) system that combines hierarchical summary trees (RAPTOR-like), knowledge graph construction, and advanced retrieval strategies  to improve information retrieval and question answering over long documents (InfiniteBench).
+This project implements a Knowledge Graph-enhanced Retrieval Augmented Generation (KG-RAG) system that combines hierarchical summary trees (RAPTOR-style), knowledge graph construction, and advanced retrieval strategies to improve information retrieval and question answering over long documents (InfiniteBench).
 
 ## Project Overview
 
-The system integrates knowledge graph construction with hierarchical document processing, creating a parent child relationship between them, to create a robust RAG pipeline. The main components are:
+The system integrates knowledge graph construction with hierarchical document processing, creating a parent-child relationship between them, to create a robust RAG pipeline. The main components are:
 
-*   **Hierarchical Indexing**: Builds a tree of summaries to capture high-level context.
-*   **Knowledge Graph Construction**: Extracts entities by NLP and relations by LLM to push to Neo4j.
-*   **Retrieval**: Implements adaptive retrieval strategies (Graph Traversal, Vector Search, Entity Filtering).
+*   **Hierarchical Indexing**: Builds a RAPTOR-style tree of summaries using UMAP/GMM clustering.
+*   **Knowledge Graph Construction**: Extracts entities via SpaCy NER and relations via LLM, then loads everything into Neo4j.
+*   **Retrieval**: Implements two adaptive retrieval strategies (C1 Baseline and C2 Region-Restricted).
+*   **Evaluation**: Measures Accuracy (EM), ROUGE-L, Macro F1, and RAGAS metrics.
 
 ## Dataset Setup
 
-Please refer to [DATA_SETUP.md](./DATA_SETUP.md) for detailed instructions on how to download and set up the **InfiniteBench** and **NovelQA** datasets.
+Please refer to [DATASET_SETUP.md](./DATASET_SETUP.md) for detailed instructions on how to download and set up the **InfiniteBench** and **NovelQA** datasets.
 
-## Key Components
+## How to Run (Step-by-Step)
 
-### `run_indexing.py`
-This is the main orchestration file that:
-*   Loads and preprocesses the dataset (InfiniteBench)
-*   Builds the Summary Tree (RAPTOR-like structure)
-*   Extracts Entities (SpaCy) and Relations (LLM)
-*   Builds FAISS Vector Indexes
-*   Saves all artifacts to a local cache
+### Step 1: Install Dependencies
 
-To run:
+```bash
+pip install -r requirements.txt
+python -m spacy download en_core_web_lg
+```
+
+### Step 2: Run the Offline Indexing Pipeline
+
+This processes all books in the dataset: chunking the text, building the summary tree, extracting entities and relations, and creating FAISS indexes. All outputs are cached to `./cache/`.
+
 ```bash
 python run_indexing.py
 ```
 
-### `build_graph.py`
-This script loads the processed data into Neo4j:
-*   Creates Entity and Chunk nodes
-*   Creates RELATION edges
-*   Ensures isolation between different Books using `book_id`
+### Step 3: Start Neo4j (Docker)
 
-To run:
-```bash
-python build_graph.py
-```
-
-### `C1_run_eval.py` (Step 1: Baseline)
-Executes the baseline retrieval evaluation (Standard E2Retrieval with enhanced graph and tree).
-```bash
-python C1_run_eval.py
-```
-- **Output**: `cache/InfiniteChoice/<book_id>/predictions.json`
-
-### `C2_run_eval.py` (Step 2: Region-Restricted)
-Executes the advanced retrieval evaluation using hierarchical region constraints.
-```bash
-python C2_run_eval.py
-```
-- **Output**: `cache/InfiniteChoice/<book_id>/predictions_C2.json`
-
-### `calculate_metrics.py`
-This script calculates the final evaluation metrics based on the predictions generated:
-*   Aggregates results from all processed books
-*   Reports **Accuracy (EM)** for Multiple Choice tasks
-*   Reports **ROUGE-L** for Free Generation tasks
-
-To run:
-```bash
-python calculate_metrics.py
-```
-
-## Directory Structure
-
-*   `run_indexing.py`: Main pipeline orchestration
-*   `run_eval.py`: Retrieval and Evaluation pipeline
-*   `calculate_metrics.py`: Metrics calculation (EM / ROUGE)
-*   `preprocessing.py`: Text cleaning and chunking modules
-*   `summary_tree.py`: Recursive tree building logic (RAPTOR-like)
-*   `entity_extraction.py`: SpaCy-based entity extraction
-*   `relation_extraction_llm.py`: LLM-based relation extraction
-*   `build_graph.py`: Neo4j loader script
-*   `C1_retrieval.py`: Core retrieval logic (Graph + Vector)
-*   `llm.py`: Unified LLM interface (OpenAI)
-*   `data/`: Contains dataset files
-*   `cache/`: Stores generated artifacts (Entities, Trees, Indexes)
-
-## Neo4j Integration
-
-To use Neo4j for this project, run the Docker container:
+The knowledge graph needs a Neo4j instance. Start one using Docker Compose:
 
 ```bash
 docker-compose up -d
 ```
 
-Or manually:
+This creates a Neo4j container accessible at:
+- **Browser**: http://localhost:7474
+- **Bolt**: bolt://localhost:7687
+- **Credentials**: `neo4j` / `testpassword`
+
+### Step 4: Build the Knowledge Graph
+
+This reads the extracted relations from the cache and uploads them into Neo4j as Entity nodes and RELATION edges.
+
 ```bash
-docker run -d \
-    --name neo4j \
-    -p 7474:7474 -p 7687:7687 \
-    -e NEO4J_AUTH=neo4j/testpassword \
-    neo4j:latest
+python build_graph.py
 ```
+
+### Step 5: Run Evaluation
+
+#### C1 Baseline Evaluation
+Uses the standard E2GraphRAG adaptive strategy.
+
+```bash
+python C1_run_eval.py
+```
+- **Output**: `cache/<dataset>/<book_id>/predictions.json`
+
+#### C2 Region-Restricted Evaluation
+Uses the advanced region-restricted retrieval with tree pruning, MMR diversity, cross-encoder reranking, and Lost-in-the-Middle reordering.
+
+```bash
+python C2_run_eval.py
+```
+- **Output**: `cache/<dataset>/<book_id>/predictions_C2.json`
+
+**Switching C2 Retrieval Strategies**: `C2_run_eval.py` supports two retrieval strategies controlled by the `RETRIEVAL_METHOD` variable at the top of the file:
+- `"shortest_path"` — Uses `C2_retrieval.py` (batched shortestPath queries in Neo4j). This is the primary method.
+- `"hop"` — Uses `C2_retrieval_hop.py` (fixed 1-hop or 2-hop graph traversal within the region).
+
+### Step 6: Calculate Metrics
+
+Aggregates predictions from all books and prints accuracy, F1, confusion matrices, and timing data.
+
+```bash
+python calculate_metrics.py
+```
+
+- Reports **Accuracy (EM)** and **Macro F1** for InfiniteChoice (multiple-choice)
+- Reports **ROUGE-L** for InfiniteQA (open-ended)
+
+### Step 7: RAGAS Evaluation
+
+Runs RAGAS framework metrics (Faithfulness, Answer Relevancy, Context Recall, Context Precision, Answer Correctness) using a local LM Studio server as the judge LLM.
+
+```bash
+python run_ragas_eval.py
+```
+
+**Requires**: LM Studio running locally at `http://localhost:1234` with a loaded model and embedding model.
+
+## Key Scripts
+
+| Script | Purpose |
+|---|---|
+| `run_indexing.py` | Main indexing pipeline (chunking, summary tree, entities, relations, FAISS) |
+| `build_graph.py` | Loads extracted relations into Neo4j |
+| `C1_retrieval.py` | Baseline retrieval engine (graph + FAISS adaptive strategy) |
+| `C1_run_eval.py` | Runs C1 retrieval evaluation on the dataset |
+| `C2_retrieval.py` | Region-restricted retrieval (shortest-path method) |
+| `C2_retrieval_hop.py` | Region-restricted retrieval (1-hop / 2-hop traversal variant) |
+| `C2_run_eval.py` | Runs C2 retrieval evaluation (supports both strategies) |
+| `calculate_metrics.py` | Calculates Accuracy, ROUGE-L, F1, confusion matrix, and timing |
+| `run_ragas_eval.py` | RAGAS framework evaluation via LM Studio |
+| `dataloader.py` | Dataset loading for NovelQA, InfiniteChoice, InfiniteQA |
+| `preprocessing.py` | Text normalization and chunking (recursive character splitting) |
+| `summary_tree.py` | RAPTOR-style hierarchical summary tree (UMAP + GMM clustering) |
+| `entity_extraction.py` | SpaCy-based NER and entity canonicalization |
+| `relation_extraction_llm.py` | LLM-based relation extraction and edge merging |
+| `build_indexes.py` | FAISS index and inverted index construction |
+| `llm.py` | Unified interface for GPT, Qwen (local), and LM Studio |
+| `prompts.py` | LLM prompt templates for multiple-choice and open-ended QA |
+
+## Directory Structure
+
+```
+Project_TGR/
+├── run_indexing.py          # Step 2: Offline indexing pipeline
+├── build_graph.py           # Step 4: Neo4j graph loader
+├── C1_retrieval.py          # Baseline retrieval logic
+├── C1_run_eval.py           # Step 5a: Baseline evaluation
+├── C2_retrieval.py          # Region-restricted retrieval (shortest-path)
+├── C2_retrieval_hop.py      # Region-restricted retrieval (hop variant)
+├── C2_run_eval.py           # Step 5b: Region-restricted evaluation
+├── calculate_metrics.py     # Step 6: Metrics aggregation
+├── run_ragas_eval.py        # Step 7: RAGAS evaluation
+├── dataloader.py            # Dataset loading utilities
+├── preprocessing.py         # Text cleaning and chunking
+├── summary_tree.py          # RAPTOR-style tree construction
+├── entity_extraction.py     # SpaCy NER
+├── relation_extraction_llm.py  # LLM relation extraction
+├── build_indexes.py         # FAISS index builder
+├── llm.py                   # LLM interface (GPT / Qwen / LM Studio)
+├── prompts.py               # Prompt templates
+├── docker-compose.yml       # Neo4j Docker setup
+├── requirements.txt         # Python dependencies
+├── data/                    # Dataset files
+├── cache/                   # Generated artifacts (trees, indexes, predictions)
+├── models/                  # Local model weights (Qwen, BGE)
+└── neo4j_data/              # Neo4j persistent storage
+```
+
+## Models Used
+
+| Component | Model | Notes |
+|---|---|---|
+| **Text Generation** | Qwen2.5-7B-Instruct (local) | Loaded via HuggingFace Transformers |
+| **Text Generation** | GPT-5-mini (API) | Via OpenAI API |
+| **Text Generation** | LM Studio (local) | Any model loaded in LM Studio |
+| **Embeddings** | BAAI/bge-m3 | 1024-dim vectors, loaded via SentenceTransformers |
+| **NER** | SpaCy en_core_web_lg | Entity extraction |
+| **Cross-Encoder** | ms-marco-MiniLM-L-6-v2 | Reranking in C2 pipeline |
 
 ## Requirements
 
-Main dependencies:
-*   `neo4j`
-*   `openai`
-*   `spacy` (`en_core_web_lg`)
-*   `faiss-cpu`
-*   `numpy`
-*   `python-dotenv`
-*   `rouge` (for metrics)
-
-Install via:
+Install all Python dependencies:
 ```bash
 pip install -r requirements.txt
 python -m spacy download en_core_web_lg

@@ -1,6 +1,6 @@
 """
-This script tests our advanced C2 graph retrieval pipeline. 
-It loops through the dataset, fetches the best contextual chunks from the graph, feeds them to the LLM, and records the predictions.
+Evaluates the C2 retrieval pipeline. Retrieves context for each question,
+generates an answer with the LLM, and saves predictions to JSON.
 """
 
 import os

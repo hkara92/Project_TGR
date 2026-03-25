@@ -1,8 +1,6 @@
 """
-This script takes all the embeddings we generated for our summary tree 
-and packs them into a fast FAISS vector search index. 
-It also builds some look-up dictionaries so we can quickly see which entities belong to which summary nodes without searching the graph every time.
-Note: You must run the summary tree and entity extraction steps before running this!
+Builds FAISS indexes from summary tree embeddings and creates
+inverted index mappings between summary nodes and entities.
 """
 
 import os

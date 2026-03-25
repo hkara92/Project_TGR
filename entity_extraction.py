@@ -1,14 +1,19 @@
-import os, re, json, spacy
+"""SpaCy-based NER extraction and entity canonicalization."""
+
+import os
+import re
+import json
+import spacy
 from collections import Counter, defaultdict
 
-# These are the specific types of entities we care about (people, organizations, locations, etc.)
-NER_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP","EVENT"}
+# Entity types we extract
+NER_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP", "EVENT"}
 
-# Sometimes the model gets confused and thinks pronouns are entities, so we filter these out manually.
+# Filter out pronouns that SpaCy sometimes tags as entities
 PRONOUN_LIKE = {"he", "she", "it", "they", "we", "i", "you", "this", "that"}
 
 def load_spacy(model_name="en_core_web_lg"):
-    """Loads the SpaCy language model. If it's not downloaded yet, it will grab it automatically."""
+    """Loads SpaCy model, downloading it if not installed."""
     try:
         return spacy.load(model_name)
     except OSError:
@@ -16,14 +21,14 @@ def load_spacy(model_name="en_core_web_lg"):
         return spacy.load(model_name)
 
 def canonicalize(text: str):
-    """Cleans up the extracted entity text to make sure variations of the same name map to the same string."""
+    """Normalizes entity text: lowercase, strip whitespace, remove surrounding quotes."""
     text = text.lower().strip()
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"^[\"'“”‘’]+|[\"'“”‘’]+$", "", text)
     return text
 
 def extract_ner_entities(doc, min_len=3):
-    """Runs through a processed SpaCy document and pulls out all the valid entities it found."""
+    """Extracts valid named entities from a SpaCy doc."""
     ents = set()
     for ent in doc.ents:
         if ent.label_ not in NER_LABELS:
@@ -35,11 +40,7 @@ def extract_ner_entities(doc, min_len=3):
     return sorted(ents)
 
 def extract_entities_from_chunks(chunks, nlp, batch_size=32):
-    """
-    Processes a bunch of text chunks and builds two lookup dictionaries:
-    - One that tells you which chunks mention a specific entity
-    - One that tells you all the entities found inside a specific chunk
-    """
+    """Builds entity-to-chunk (I_e2c) and chunk-to-entity (I_c2e) mappings."""
     I_c2e = {}
     I_e2c = defaultdict(list)
 
@@ -55,7 +56,7 @@ def extract_entities_from_chunks(chunks, nlp, batch_size=32):
     return dict(I_e2c), I_c2e
 
 def save_entities(I_e2c, I_c2e, cache_dir):
-    """Saves our entity mapping dictionaries out to JSON files so we can load them later without reprocessing."""
+    """Saves entity mappings to JSON files in the cache directory."""
     entities_dir = os.path.join(cache_dir, "entities")
     os.makedirs(entities_dir, exist_ok=True)
 

@@ -1,6 +1,6 @@
 """
-Here we handle cleaning up the raw text and splitting it into manageable chunks.
-We can either chunk by exact token counts or use langchain's recursive character splitter.
+Text normalization and chunking. Supports token-based splitting (tiktoken)
+and recursive character splitting (LangChain).
 """
 
 import re

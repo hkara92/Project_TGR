@@ -1,14 +1,6 @@
 """
-This file builds our hierarchical summary tree, similar to the RAPTOR paper.
-
-Here is how it works:
-1. We cluster everything globally using UMAP and Gaussian Mixture Models (GMM).
-2. We then take each large cluster and break it down further into smaller local clusters.
-3. We summarize those clusters, get their embeddings, and repeat the whole process until we have a single root node.
-
-We use two different prompts:
-- For the first layer (Level 1), our prompt extracts concrete facts from the raw text chunks.
-- For higher layers (Level 2 and above), our prompt synthesizes summaries of summaries to capture the broader picture.
+Builds a RAPTOR-style hierarchical summary tree using UMAP + GMM clustering.
+Recursively clusters, summarizes, and embeds until a single root node remains.
 """
 
 import os

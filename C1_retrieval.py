@@ -270,30 +270,30 @@ class Retriever:
         # Use provided full_query (Question + Options) or fallback to question
         dense_input = full_query if full_query else question
         
-        # Step 1: Extract entities from Question Only
+        # Extract entities from question
         entities = self.extract_query_entities(question)
         
-        # Step 2: No entities found, fall back to global dense retrieval
+        # No entities found, fall back to global dense retrieval
         if not entities:
             print("No entities -> Global Search")
             res = self.dense_retrieval(dense_input, max_chunks)
             return self._build_result(res, entities, "Global Search", [])
         
-        # Step 3: Local retrieval (Graph-based, using Entities)
+        # Try graph-based local retrieval using the entities
         print("Starting local retrieval...")
         local_res = self.local_retrieval(entities, k)
         count = self._count_chunks(local_res)
         history = [(k, count)]
         print(f"Local: k={k}, count={count}")
         
-        # Step 4: Zero graph results, use dense retrieval ranked by entity occurrence
+        # Graph returned nothing, fall back to dense retrieval with entity-aware ranking
         if count == 0:
             print("Local=0 to Occurrence Rerank")
             dense = self.dense_retrieval(dense_input, max_chunks * 2)
             res = self.occurrence_ranking(dense.get("", []), entities, max_chunks)
             return self._build_result(res, entities, "Occurrence Rerank", history)
         
-        # Step 5: Too many to Iterative tightening
+        # Too many results, iteratively tighten the path length
         prev_res = None
         while count > max_chunks:
             prev_res = copy.deepcopy(local_res)
@@ -307,7 +307,7 @@ class Retriever:
             history.append((k, count))
             print(f"Tighten: k={k}, count={count}")
         
-        # Step 6: Return result
+        # Return final result
         if count > 0:
             rtype = f"Local, Loop for {len(history)-1} times"
             return self._build_result(local_res, entities, rtype, history)

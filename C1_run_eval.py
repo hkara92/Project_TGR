@@ -106,7 +106,7 @@ def evaluate_book(raw_book_id, dataset):
         q_graph = qa["question"]
         q_dense = qa["question"]
 
-        # Step 1: Retrieve evidence chunks
+        # Retrieve evidence chunks
         print(f"  Q{i}/{len(qa_pairs)-1}: Retrieving...")
         t_start_retrieval = time.time()
         result = retriever.query(question=q_graph, full_query=q_dense)
@@ -116,7 +116,7 @@ def evaluate_book(raw_book_id, dataset):
         n_chunks = result.get('len_chunks', 0)
         print(f"  Q{i}/{len(qa_pairs)-1}: {n_chunks} chunks retrieved via [{rtype}] (qtime={retrieval_time:.2f}s)")
 
-        # Step 2: Generate answer with the LLM
+        # Generate answer with the LLM
         print(f"  Q{i}/{len(qa_pairs)-1}: LLM generating answer...")
         prompt_template = PROMPT_CHOICE if qa["options"] else PROMPT_OPEN
         final_prompt = prompt_template.format(question=qa["question"], evidence=evidence_text)
@@ -127,7 +127,7 @@ def evaluate_book(raw_book_id, dataset):
             print(f"  Q{i}/{len(qa_pairs)-1}: [ERROR] LLM failed: {e}")
             llm_output = "Z"
 
-        # Step 3: Extract the final prediction
+        # Extract the final prediction
         if qa["options"]:
             final_pred = extract_answer(llm_output)
         else:
